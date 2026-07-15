@@ -19,6 +19,9 @@
   
   --theme-af-color: #00ff88;
   --theme-af-glow: rgba(0, 255, 136, 0.4);
+
+  --theme-inf-color: #8fce5d;
+  --theme-inf-glow: rgba(143, 206, 93, 0.4);
   
   --theme-mpy-color: #ff00ea;
   --theme-mpy-glow: rgba(255, 0, 234, 0.4);
@@ -192,6 +195,7 @@ body {
 #btn-sf { --theme-color: var(--theme-sf-color); --theme-glow: var(--theme-sf-glow); }
 #btn-mp { --theme-color: var(--theme-mp-color); --theme-glow: var(--theme-mp-glow); }
 #btn-af { --theme-color: var(--theme-af-color); --theme-glow: var(--theme-af-glow); }
+#btn-inf { --theme-color: var(--theme-inf-color); --theme-glow: var(--theme-inf-glow); }
 #btn-mpy { --theme-color: var(--theme-mpy-color); --theme-glow: var(--theme-mpy-glow); }
 
 /* Holographic Tooltips */
@@ -873,6 +877,7 @@ body {
 .modal.division-sf { --active-color: var(--theme-sf-color); --active-glow: var(--theme-sf-glow); }
 .modal.division-mp { --active-color: var(--theme-mp-color); --active-glow: var(--theme-mp-glow); }
 .modal.division-af { --active-color: var(--theme-af-color); --active-glow: var(--theme-af-glow); }
+.modal.division-inf { --active-color: var(--theme-inf-color); --active-glow: var(--theme-inf-glow); }
 .modal.division-mpy { --active-color: var(--theme-mpy-color); --active-glow: var(--theme-mpy-glow); }
 
 /* Custom Scrollbars */

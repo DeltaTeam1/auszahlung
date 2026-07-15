@@ -25,6 +25,12 @@ document.addEventListener('DOMContentLoaded', () => {
       emoji: '✈️',
       class: 'division-af'
     },
+    inf: {
+      id: 'inf',
+      name: 'Infanterie',
+      emoji: '🪖',
+      class: 'division-inf'
+    },
     mpy: {
       id: 'mpy',
       name: 'Main Payout',
@@ -102,7 +108,7 @@ document.addEventListener('DOMContentLoaded', () => {
       await importFromGoogleSheet();
     } catch (error) {
       console.warn('Google Sheet import failed:', error);
-      setSyncStatus('offline', 'Google Sheet nicht verfügbar, lokale Daten bleiben aktiv');
+      setSyncStatus('offline', 'Feldfunk getrennt, lokaler Speicher aktiv');
     }
   }
 
@@ -181,7 +187,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const payload = buildSheetPayload();
 
     if (!GOOGLE_APPS_SCRIPT_URL) {
-      setSyncStatus('synced', 'Lokal gespeichert');
+      setSyncStatus('synced', 'Im Feldspeicher gesichert');
       return;
     }
 
@@ -197,15 +203,15 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       const body = await response.json().catch(() => ({}));
       if (body && body.ok) {
-        setSyncStatus('synced', 'Google Sheet synchronisiert');
+        setSyncStatus('synced', 'Gefechtsdatenbank synchronisiert');
       } else {
         throw new Error(body && body.error ? body.error : 'Unbekannter Fehler beim Export');
       }
     } catch (error) {
       console.warn('Google Sheet export failed:', error);
       const reason = error && error.message ? error.message : 'Unbekannter Fehler';
-      setSyncStatus('offline', `Export fehlgeschlagen: ${reason}`);
-      showToast(`Google-Export fehlgeschlagen: ${reason}`, 'warning');
+      setSyncStatus('offline', `Datenfunk-Upload fehlgeschlagen: ${reason}`);
+      showToast(`Datenfunk-Upload fehlgeschlagen: ${reason}`, 'warning');
     }
   }
 
@@ -224,7 +230,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
       const data = body.data || null;
       if (!data || !Array.isArray(data)) {
-        setSyncStatus('synced', 'Lokal gespeichert');
+        setSyncStatus('synced', 'Im Feldspeicher gesichert');
         return;
       }
 
@@ -263,7 +269,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
       });
 
-      setSyncStatus('synced', 'Google Sheet importiert');
+      setSyncStatus('synced', 'Gefechtsdatenbank importiert');
     } catch (error) {
       console.warn('Google Sheet import failed:', error);
       throw error;
