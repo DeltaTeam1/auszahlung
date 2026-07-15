@@ -188,7 +188,6 @@ document.addEventListener('DOMContentLoaded', () => {
     try {
       const response = await fetch(GOOGLE_APPS_SCRIPT_URL, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
 
