@@ -91,6 +91,7 @@ document.addEventListener('DOMContentLoaded', () => {
     updateGlobalStats();
     setupEventListeners();
     startClock();
+    startRemoteSyncPolling();
   });
 
   // --- FUNCTIONS ---
@@ -163,10 +164,21 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function saveLocalAndSync() {
     updateGlobalStats();
-    await persistToGoogleSheet();
+
+    try {
+      const remoteState = await importFromGoogleSheet({ applyToLocal: false, suppressStatus: true });
+      const localState = buildStateSnapshotFromLocalStorage();
+      const mergedState = mergeStateSnapshots(remoteState, localState);
+
+      applyStateSnapshotToLocalStorage(mergedState);
+      await persistToGoogleSheet(buildSheetPayload(mergedState));
+    } catch (error) {
+      console.warn('Remote merge before save failed, trying direct upload:', error);
+      await persistToGoogleSheet(buildSheetPayload());
+    }
   }
 
-  function buildSheetPayload() {
+  function buildStateSnapshotFromLocalStorage() {
     const payoutHistory = {};
     const divisionPasswords = {};
 
@@ -176,15 +188,24 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     return {
-      spreadsheetUrl: GOOGLE_SHEET_URL,
       payoutHistory,
       divisionPasswords,
       lastUpdated: new Date().toISOString()
     };
   }
 
-  async function persistToGoogleSheet() {
-    const payload = buildSheetPayload();
+  function buildSheetPayload(snapshot = null) {
+    const state = snapshot || buildStateSnapshotFromLocalStorage();
+
+    return {
+      spreadsheetUrl: GOOGLE_SHEET_URL,
+      payoutHistory: state.payoutHistory,
+      divisionPasswords: state.divisionPasswords,
+      lastUpdated: state.lastUpdated || new Date().toISOString()
+    };
+  }
+
+  async function persistToGoogleSheet(payload = buildSheetPayload()) {
 
     if (!GOOGLE_APPS_SCRIPT_URL) {
       setSyncStatus('synced', 'Im Feldspeicher gesichert');
@@ -215,9 +236,84 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  async function importFromGoogleSheet() {
+  function normalizeTransactionEntry(entry) {
+    const recipient = entry && entry.recipient ? String(entry.recipient) : 'Unbekannt';
+    const amount = parseFloat((entry && entry.amount) || 0);
+    const purpose = entry && entry.purpose ? String(entry.purpose) : '';
+    const timestamp = entry && entry.timestamp ? String(entry.timestamp) : new Date().toISOString();
+    const status = entry && entry.status ? String(entry.status) : 'Bearbeitung';
+    const id = entry && entry.id
+      ? String(entry.id)
+      : `${recipient}|${amount}|${purpose}|${timestamp}`;
+
+    return {
+      id,
+      recipient,
+      amount,
+      purpose,
+      status,
+      timestamp
+    };
+  }
+
+  function mergeTransactionArrays(remoteTransactions = [], localTransactions = [], preferLocal = true) {
+    const map = new Map();
+
+    const first = preferLocal ? remoteTransactions : localTransactions;
+    const second = preferLocal ? localTransactions : remoteTransactions;
+
+    first.forEach(item => {
+      const normalized = normalizeTransactionEntry(item);
+      map.set(normalized.id, normalized);
+    });
+
+    second.forEach(item => {
+      const normalized = normalizeTransactionEntry(item);
+      map.set(normalized.id, normalized);
+    });
+
+    return Array.from(map.values()).sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+  }
+
+  function mergeStateSnapshots(remoteState, localState, options = {}) {
+    const { preferLocal = true } = options;
+    const merged = {
+      payoutHistory: {},
+      divisionPasswords: {},
+      lastUpdated: new Date().toISOString()
+    };
+
+    Object.keys(DIVISIONS).forEach(key => {
+      const remoteTransactions = (remoteState && remoteState.payoutHistory && remoteState.payoutHistory[key]) || [];
+      const localTransactions = (localState && localState.payoutHistory && localState.payoutHistory[key]) || [];
+      merged.payoutHistory[key] = mergeTransactionArrays(remoteTransactions, localTransactions, preferLocal);
+
+      const remotePassword = (remoteState && remoteState.divisionPasswords && remoteState.divisionPasswords[key]) || '';
+      const localPassword = (localState && localState.divisionPasswords && localState.divisionPasswords[key]) || '';
+      merged.divisionPasswords[key] = preferLocal ? (localPassword || remotePassword) : (remotePassword || localPassword);
+    });
+
+    return merged;
+  }
+
+  function applyStateSnapshotToLocalStorage(state) {
+    Object.keys(DIVISIONS).forEach(key => {
+      const transactions = (state && state.payoutHistory && state.payoutHistory[key]) || [];
+      localStorage.setItem(`payout_history_${key}`, JSON.stringify(transactions));
+
+      const password = (state && state.divisionPasswords && state.divisionPasswords[key]) || '';
+      if (password) {
+        localStorage.setItem(`division_password_${key}`, password);
+      } else {
+        localStorage.removeItem(`division_password_${key}`);
+      }
+    });
+  }
+
+  async function importFromGoogleSheet(options = {}) {
+    const { applyToLocal = true, suppressStatus = false } = options;
     try {
-      const response = await fetch(GOOGLE_APPS_SCRIPT_URL, {
+      const response = await fetch(`${GOOGLE_APPS_SCRIPT_URL}?t=${Date.now()}`, {
         method: 'GET',
         headers: { 'Accept': 'application/json' }
       });
@@ -230,8 +326,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
       const data = body.data || null;
       if (!data || !Array.isArray(data)) {
-        setSyncStatus('synced', 'Im Feldspeicher gesichert');
-        return;
+        if (!suppressStatus) {
+          setSyncStatus('synced', 'Im Feldspeicher gesichert');
+        }
+        return buildStateSnapshotFromLocalStorage();
       }
 
       const transactionsByDivision = {};
@@ -247,33 +345,49 @@ document.addEventListener('DOMContentLoaded', () => {
           return;
         }
 
-        if (entry.type === 'transaction' && entry.division) {
-          const amount = parseFloat(entry.amount || 0);
-          transactionsByDivision[entry.division].push({
-            recipient: entry.recipient || 'Unbekannt',
-            amount,
-            purpose: entry.purpose || '',
-            status: entry.status || 'Bearbeitung',
-            timestamp: entry.timestamp || new Date().toISOString()
-          });
+        if (entry.type === 'transaction' && entry.division && transactionsByDivision[entry.division]) {
+          transactionsByDivision[entry.division].push(normalizeTransactionEntry(entry));
         }
       });
 
-      Object.keys(DIVISIONS).forEach(key => {
-        const stored = transactionsByDivision[key] || [];
-        localStorage.setItem(`payout_history_${key}`, JSON.stringify(stored));
-        if (passwordsByDivision[key]) {
-          localStorage.setItem(`division_password_${key}`, passwordsByDivision[key]);
-        } else {
-          localStorage.removeItem(`division_password_${key}`);
-        }
-      });
+      const importedState = {
+        payoutHistory: transactionsByDivision,
+        divisionPasswords: passwordsByDivision,
+        lastUpdated: new Date().toISOString()
+      };
 
-      setSyncStatus('synced', 'Gefechtsdatenbank importiert');
+      if (applyToLocal) {
+        applyStateSnapshotToLocalStorage(importedState);
+      }
+
+      if (!suppressStatus) {
+        setSyncStatus('synced', 'Gefechtsdatenbank importiert');
+      }
+
+      return importedState;
     } catch (error) {
       console.warn('Google Sheet import failed:', error);
       throw error;
     }
+  }
+
+  function startRemoteSyncPolling() {
+    if (!GOOGLE_APPS_SCRIPT_URL) return;
+
+    setInterval(async () => {
+      try {
+        const remoteState = await importFromGoogleSheet({ applyToLocal: false, suppressStatus: true });
+        const localState = buildStateSnapshotFromLocalStorage();
+        const mergedState = mergeStateSnapshots(remoteState, localState, { preferLocal: false });
+        applyStateSnapshotToLocalStorage(mergedState);
+        updateGlobalStats();
+        if (activeDivisionId) {
+          renderModalStats();
+        }
+      } catch (error) {
+        // Silent polling failure: status indicator is handled by explicit sync actions.
+      }
+    }, 15000);
   }
 
   // Setup Event Listeners
@@ -673,12 +787,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
     setTimeout(() => {
       const history = JSON.parse(localStorage.getItem(`payout_history_${divKey}`)) || [];
+      const nowIso = new Date().toISOString();
       const newTransaction = {
+        id: `${recipient}|${amount}|${purpose}|${nowIso}`,
         recipient,
         amount,
         purpose,
         status: 'Bearbeitung',
-        timestamp: new Date().toISOString()
+        timestamp: nowIso
       };
       history.push(newTransaction);
       localStorage.setItem(`payout_history_${divKey}`, JSON.stringify(history));

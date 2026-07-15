@@ -13,6 +13,7 @@ const DEFAULT_DATA = {
     sf: [],
     mp: [],
     af: [],
+    inf: [],
     mpy: []
   },
   division_passwords: {
@@ -20,6 +21,7 @@ const DEFAULT_DATA = {
     sf: '',
     mp: '',
     af: '',
+    inf: '',
     mpy: ''
   },
   lastModified: new Date().toISOString()
