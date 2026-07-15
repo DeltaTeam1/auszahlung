@@ -86,6 +86,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const GOOGLE_SHEET_ID = '1caffNc0TQMuvZTdptFPRnD-5CefuS9Eqs4kr91BkDKY';
   const GOOGLE_SHEET_TAB_NAME = 'Data';
   const GOOGLE_APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbxUKzUqJ5LaLBuo6uz9bSdtG5jFygJVspw-Z5lwV992mWXv54idcjivz2dfPfc7cTSTIg/exec';
+  const TOMBSTONE_DIVISION_KEY = '__deleted__';
   const DELETED_IDS_STORAGE_KEY = 'payout_deleted_ids';
   let syncInProgress = false;
   let syncRequested = false;
@@ -202,25 +203,21 @@ document.addEventListener('DOMContentLoaded', () => {
       const remoteState = await importFromGoogleSheet({ applyToLocal: false, suppressStatus: true });
       const localState = buildStateSnapshotFromLocalStorage();
       const deletedIdSet = getDeletedIdSet();
+      (remoteState && remoteState.deletedIds || []).forEach((id) => deletedIdSet.add(String(id)));
       const mergedState = mergeStateSnapshots(remoteState, localState, { deletedIdSet });
 
       applyStateSnapshotToLocalStorage(mergedState);
-      const uploaded = await persistToGoogleSheet(buildSheetPayload(mergedState));
-      if (uploaded) {
-        clearDeletedIds();
-      }
+      await persistToGoogleSheet(buildSheetPayload(mergedState));
     } catch (error) {
       console.warn('Remote merge before save failed, trying direct upload:', error);
-      const uploaded = await persistToGoogleSheet(buildSheetPayload());
-      if (uploaded) {
-        clearDeletedIds();
-      }
+      await persistToGoogleSheet(buildSheetPayload());
     }
   }
 
   function buildStateSnapshotFromLocalStorage() {
     const payoutHistory = {};
     const divisionPasswords = {};
+    const deletedIds = Array.from(getDeletedIdSet());
 
     Object.keys(DIVISIONS).forEach(key => {
       payoutHistory[key] = JSON.parse(localStorage.getItem(`payout_history_${key}`)) || [];
@@ -230,16 +227,32 @@ document.addEventListener('DOMContentLoaded', () => {
     return {
       payoutHistory,
       divisionPasswords,
+      deletedIds,
       lastUpdated: new Date().toISOString()
     };
   }
 
   function buildSheetPayload(snapshot = null) {
     const state = snapshot || buildStateSnapshotFromLocalStorage();
+    const deletedIds = Array.from(new Set([
+      ...(state.deletedIds || []),
+      ...Array.from(getDeletedIdSet())
+    ]));
+    const payoutHistory = {
+      ...(state.payoutHistory || {})
+    };
+
+    payoutHistory[TOMBSTONE_DIVISION_KEY] = deletedIds.map((id) => ({
+      recipient: id,
+      amount: 0,
+      purpose: 'tombstone',
+      status: 'Deleted',
+      timestamp: new Date().toISOString()
+    }));
 
     return {
       spreadsheetUrl: GOOGLE_SHEET_URL,
-      payoutHistory: state.payoutHistory,
+      payoutHistory,
       divisionPasswords: state.divisionPasswords,
       lastUpdated: state.lastUpdated || new Date().toISOString()
     };
@@ -308,11 +321,15 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
+  function setDeletedIdSet(deletedSet) {
+    localStorage.setItem(DELETED_IDS_STORAGE_KEY, JSON.stringify(Array.from(deletedSet)));
+  }
+
   function addDeletedId(id) {
     if (!id) return;
     const deleted = getDeletedIdSet();
     deleted.add(String(id));
-    localStorage.setItem(DELETED_IDS_STORAGE_KEY, JSON.stringify(Array.from(deleted)));
+    setDeletedIdSet(deleted);
   }
 
   function clearDeletedIds() {
@@ -345,6 +362,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const merged = {
       payoutHistory: {},
       divisionPasswords: {},
+      deletedIds: Array.from(deletedIdSet),
       lastUpdated: new Date().toISOString()
     };
 
@@ -373,13 +391,17 @@ document.addEventListener('DOMContentLoaded', () => {
         localStorage.removeItem(`division_password_${key}`);
       }
     });
+
+    const existingDeletedIds = getDeletedIdSet();
+    const incomingDeletedIds = new Set((state && state.deletedIds) || []);
+    incomingDeletedIds.forEach((id) => existingDeletedIds.add(String(id)));
+    setDeletedIdSet(existingDeletedIds);
   }
 
   async function importFromGoogleSheet(options = {}) {
     const { applyToLocal = true, suppressStatus = false } = options;
     try {
       const response = await fetchWithTimeout(`${GOOGLE_APPS_SCRIPT_URL}?t=${Date.now()}`, {
-        method: 'GET',
         headers: { 'Accept': 'application/json' }
       });
       if (!response.ok) throw new Error(`Import fehlgeschlagen (${response.status})`);
@@ -406,12 +428,21 @@ document.addEventListener('DOMContentLoaded', () => {
 
       const transactionsByDivision = {};
       const passwordsByDivision = {};
+      const importedDeletedIdSet = new Set();
 
       Object.keys(DIVISIONS).forEach(key => {
         transactionsByDivision[key] = [];
       });
 
       data.forEach(entry => {
+        if (entry.type === 'transaction' && entry.division === TOMBSTONE_DIVISION_KEY) {
+          const deletedId = entry.recipient ? String(entry.recipient) : '';
+          if (deletedId) {
+            importedDeletedIdSet.add(deletedId);
+          }
+          return;
+        }
+
         if (entry.type === 'password' && entry.division) {
           passwordsByDivision[entry.division] = entry.password || '';
           return;
@@ -425,6 +456,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const importedState = {
         payoutHistory: transactionsByDivision,
         divisionPasswords: passwordsByDivision,
+        deletedIds: Array.from(importedDeletedIdSet),
         lastUpdated: new Date().toISOString()
       };
 
@@ -446,12 +478,21 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const transactionsByDivision = {};
         const passwordsByDivision = {};
+        const importedDeletedIdSet = new Set();
 
         Object.keys(DIVISIONS).forEach(key => {
           transactionsByDivision[key] = [];
         });
 
         fallbackData.forEach(entry => {
+          if (entry.type === 'transaction' && entry.division === TOMBSTONE_DIVISION_KEY) {
+            const deletedId = entry.recipient ? String(entry.recipient) : '';
+            if (deletedId) {
+              importedDeletedIdSet.add(deletedId);
+            }
+            return;
+          }
+
           if (entry.type === 'password' && entry.division) {
             passwordsByDivision[entry.division] = entry.password || '';
             return;
@@ -465,6 +506,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const importedState = {
           payoutHistory: transactionsByDivision,
           divisionPasswords: passwordsByDivision,
+          deletedIds: Array.from(importedDeletedIdSet),
           lastUpdated: new Date().toISOString()
         };
 
@@ -531,6 +573,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const remoteState = await importFromGoogleSheet({ applyToLocal: false, suppressStatus: true });
         const localState = buildStateSnapshotFromLocalStorage();
         const deletedIdSet = getDeletedIdSet();
+        (remoteState && remoteState.deletedIds || []).forEach((id) => deletedIdSet.add(String(id)));
         const mergedState = mergeStateSnapshots(remoteState, localState, { preferLocal: false, deletedIdSet });
         applyStateSnapshotToLocalStorage(mergedState);
         updateGlobalStats();
