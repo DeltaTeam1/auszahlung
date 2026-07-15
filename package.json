@@ -1,0 +1,9 @@
+﻿{
+  "name": "auszahlung-panel",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Statisches Auszahlung-Panel ohne Backend",
+  "scripts": {
+    "start": "python -m http.server 8000"
+  }
+}

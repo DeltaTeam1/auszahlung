@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Auszahlung Control Panel</title>
+  <meta name="description" content="Holographisches Auszahlung-Panel für Divisionen und Budgetverwaltung.">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+  <!-- Dashboard Global Header -->
+  <div class="dashboard-header">
+    <div class="dashboard-title">
+      <h1>💰 Auszahlung Panel</h1>
+      <div class="dashboard-subtitle" id="live-time">Lade Systemdaten...</div>
+    </div>
+    
+    <div class="dashboard-stats">
+      <div class="global-stat-card">
+        <div class="global-stat-label">Gesamt Ausgezahlt</div>
+        <div class="global-stat-val" id="global-total-spent">0 $</div>
+      </div>
+      <div class="global-stat-card">
+        <div class="global-stat-label">Offene Auszahlungen</div>
+        <div class="global-stat-val" id="global-pending-total">0 $</div>
+      </div>
+    </div>
+    <div class="sync-status" id="sync-status">Lokal gespeichert</div>
+  </div>
+
+  <!-- Interactive Graphic Container -->
+  <div class="panel-container">
+    
+    <!-- Hotspot: Human Resources -->
+    <div class="hotspot" id="btn-hr" data-division="hr" style="left: 16.0%; top: 24.0%;">
+      <button class="circle-btn" aria-label="Human Resources">👥</button>
+      <div class="tooltip">Human Resources</div>
+    </div>
+
+    <!-- Hotspot: Special Force -->
+    <div class="hotspot" id="btn-sf" data-division="sf" style="left: 27.0%; top: 72.0%;">
+      <button class="circle-btn" aria-label="Special Force">🎯</button>
+      <div class="tooltip">Special Force</div>
+    </div>
+
+    <!-- Hotspot: Military Police -->
+    <div class="hotspot" id="btn-mp" data-division="mp" style="left: 50.0%; top: 18.0%;">
+      <button class="circle-btn" aria-label="Military Police">🛡️</button>
+      <div class="tooltip">Military Police</div>
+    </div>
+
+    <!-- Hotspot: Air Force -->
+    <div class="hotspot" id="btn-af" data-division="af" style="left: 73.0%; top: 72.0%;">
+      <button class="circle-btn" aria-label="Air Force">✈️</button>
+      <div class="tooltip">Air Force</div>
+    </div>
+
+    <!-- Hotspot: Main Payout -->
+    <div class="hotspot" id="btn-mpy" data-division="mpy" style="left: 84.0%; top: 24.0%;">
+      <button class="circle-btn" aria-label="Main Payout">🔐</button>
+      <div class="tooltip">Main Payout</div>
+    </div>
+
+    <!-- Cyber Glassmorphic Modal Console -->
+    <div class="modal" id="payout-modal">
+      <div class="modal-content">
+        <button class="close-btn" id="close-modal" aria-label="Schließen">&times;</button>
+        
+        <div class="modal-header">
+          <h2 id="modal-title">DIVISIONS CONSOLE</h2>
+        </div>
+        
+        <div class="modal-grid">
+          <!-- Left: Payout Form -->
+          <div class="modal-form-section">
+            <form id="payout-form">
+              <input type="hidden" id="payout-division" value="">
+              
+              <div class="form-group">
+                <label for="payout-recipient">Auszahler (DN/Name/ID)</label>
+                <input type="text" id="payout-recipient" placeholder="z. B. Agent Echo" required autocomplete="off">
+              </div>
+              
+              <div class="form-group">
+                <label for="payout-amount">Auszahlungsbetrag</label>
+                <div class="amount-input-wrapper">
+                  <input type="number" id="payout-amount" placeholder="0" min="1" required>
+                  <span class="currency-tag">$</span>
+                </div>
+              </div>
+
+              <div class="form-group" id="password-group">
+                <label for="payout-password">Division Passwort</label>
+                <input type="password" id="payout-password" placeholder="Passwort eingeben" autocomplete="off">
+                <div class="form-note" id="password-note">Passwort muss im Main Payout erstellt werden.</div>
+              </div>
+
+              <div class="form-group">
+                <label for="payout-purpose">Zweck / Notiz</label>
+                <textarea id="payout-purpose" rows="2" placeholder="z. B. Sold / Bonus für Mission Omega" required></textarea>
+              </div>
+              
+              <button type="submit" class="submit-btn">Auszahlung freigeben</button>
+            </form>
+          </div>
+          
+          <!-- Right: Stats & History -->
+          <div class="modal-stats-section">
+            <!-- History List -->
+            <div class="history-card">
+              <h3 id="history-title">Transaktionsverlauf</h3>
+              <div class="history-list" id="payout-history-list">
+                <!-- Dynamically filled by JS -->
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Admin Console Grid for Main Payout -->
+        <div class="modal-admin-grid" id="modal-admin-grid" style="display: none;">
+          <div class="pending-summary-card" id="pending-summary-card">
+            <h3>Ausstehende Auszahlungen je Abteilung</h3>
+            <div class="pending-summary-list" id="pending-summary-list"></div>
+          </div>
+          <div class="password-manager-card" id="password-manager-card">
+            <h3>Passwortverwaltung</h3>
+            <div class="password-manager-list" id="password-manager-list"></div>
+          </div>
+          <div class="admin-history-card">
+            <h3>Übersicht aller Divisions-Auszahlungen</h3>
+            <div class="admin-table-container">
+              <table class="admin-table">
+                <thead>
+                  <tr>
+                    <th>Bereich</th>
+                    <th>Empfänger</th>
+                    <th>Betrag</th>
+                    <th>Zweck / Notiz</th>
+                    <th>Datum</th>
+                    <th>Uhrzeit</th>
+                    <th>Status</th>
+                    <th>Aktionen</th>
+                  </tr>
+                </thead>
+                <tbody id="admin-payout-list">
+                  <!-- Dynamically filled by JS -->
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Toast Notification Container -->
+  <div id="toast-container" class="toast-container"></div>
+
+  <div class="confirm-modal" id="delete-confirm-modal" aria-hidden="true">
+    <div class="confirm-modal-card">
+      <p id="confirm-message">Soll die Auszahlung wirklich gelöscht werden?</p>
+      <div class="confirm-actions">
+        <button id="confirm-delete-btn" class="confirm-btn confirm-delete-btn">Löschen</button>
+        <button id="cancel-delete-btn" class="confirm-btn confirm-cancel-btn">Abbrechen</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="script.js"></script>
+
+  <div class="login-modal" id="main-payout-login-modal" aria-hidden="true">
+    <div class="login-modal-card">
+      <h3>Main Payout Zugang</h3>
+      <p>Bitte gebe das Master-Passwort ein, um den Main Payout Bereich zu öffnen.</p>
+      <input type="password" id="main-payout-access-password" placeholder="Passwort" autocomplete="off">
+      <div class="login-actions">
+        <button id="login-confirm-btn" class="confirm-btn confirm-delete-btn">Bestätigen</button>
+        <button id="login-cancel-btn" class="confirm-btn confirm-cancel-btn">Abbrechen</button>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
