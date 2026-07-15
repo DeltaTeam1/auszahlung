@@ -84,7 +84,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const GOOGLE_SHEET_URL = 'https://docs.google.com/spreadsheets/d/1caffNc0TQMuvZTdptFPRnD-5CefuS9Eqs4kr91BkDKY/edit?usp=sharing';
   const GOOGLE_SHEET_ID = '1caffNc0TQMuvZTdptFPRnD-5CefuS9Eqs4kr91BkDKY';
+  const GOOGLE_SHEET_TAB_NAME = 'Data';
   const GOOGLE_APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbxUKzUqJ5LaLBuo6uz9bSdtG5jFygJVspw-Z5lwV992mWXv54idcjivz2dfPfc7cTSTIg/exec';
+  let syncInProgress = false;
+  let syncRequested = false;
 
   // --- INITIALIZATION ---
   initData().then(() => {
@@ -162,9 +165,38 @@ document.addEventListener('DOMContentLoaded', () => {
     syncStatusEl.title = message;
   }
 
+  async function fetchWithTimeout(url, options = {}, timeoutMs = 12000) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      return await fetch(url, { ...options, signal: controller.signal });
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
   async function saveLocalAndSync() {
     updateGlobalStats();
+    syncRequested = true;
+    if (!syncInProgress) {
+      await runSyncLoop();
+    }
+  }
 
+  async function runSyncLoop() {
+    syncInProgress = true;
+    try {
+      while (syncRequested) {
+        syncRequested = false;
+        await performSyncCycle();
+      }
+    } finally {
+      syncInProgress = false;
+    }
+  }
+
+  async function performSyncCycle() {
     try {
       const remoteState = await importFromGoogleSheet({ applyToLocal: false, suppressStatus: true });
       const localState = buildStateSnapshotFromLocalStorage();
@@ -213,7 +245,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     try {
-      const response = await fetch(GOOGLE_APPS_SCRIPT_URL, {
+      const response = await fetchWithTimeout(GOOGLE_APPS_SCRIPT_URL, {
         method: 'POST',
         body: JSON.stringify(payload)
       });
@@ -313,7 +345,7 @@ document.addEventListener('DOMContentLoaded', () => {
   async function importFromGoogleSheet(options = {}) {
     const { applyToLocal = true, suppressStatus = false } = options;
     try {
-      const response = await fetch(`${GOOGLE_APPS_SCRIPT_URL}?t=${Date.now()}`, {
+      const response = await fetchWithTimeout(`${GOOGLE_APPS_SCRIPT_URL}?t=${Date.now()}`, {
         method: 'GET',
         headers: { 'Accept': 'application/json' }
       });
@@ -324,7 +356,14 @@ document.addEventListener('DOMContentLoaded', () => {
         throw new Error(body && body.error ? body.error : 'No valid import payload from Apps Script');
       }
 
-      const data = body.data || null;
+      let data = body.data || null;
+
+      // Some Apps Script deployments only return a status message on GET.
+      // In that case, read the public sheet rows through gviz as a fallback.
+      if (!Array.isArray(data)) {
+        data = await fetchSheetRowsViaGviz();
+      }
+
       if (!data || !Array.isArray(data)) {
         if (!suppressStatus) {
           setSyncStatus('synced', 'Im Feldspeicher gesichert');
@@ -366,9 +405,89 @@ document.addEventListener('DOMContentLoaded', () => {
 
       return importedState;
     } catch (error) {
-      console.warn('Google Sheet import failed:', error);
-      throw error;
+      try {
+        const fallbackData = await fetchSheetRowsViaGviz();
+        if (!Array.isArray(fallbackData)) {
+          throw error;
+        }
+
+        const transactionsByDivision = {};
+        const passwordsByDivision = {};
+
+        Object.keys(DIVISIONS).forEach(key => {
+          transactionsByDivision[key] = [];
+        });
+
+        fallbackData.forEach(entry => {
+          if (entry.type === 'password' && entry.division) {
+            passwordsByDivision[entry.division] = entry.password || '';
+            return;
+          }
+
+          if (entry.type === 'transaction' && entry.division && transactionsByDivision[entry.division]) {
+            transactionsByDivision[entry.division].push(normalizeTransactionEntry(entry));
+          }
+        });
+
+        const importedState = {
+          payoutHistory: transactionsByDivision,
+          divisionPasswords: passwordsByDivision,
+          lastUpdated: new Date().toISOString()
+        };
+
+        if (applyToLocal) {
+          applyStateSnapshotToLocalStorage(importedState);
+        }
+
+        if (!suppressStatus) {
+          setSyncStatus('synced', 'Gefechtsdatenbank importiert');
+        }
+
+        return importedState;
+      } catch (fallbackError) {
+        console.warn('Google Sheet import failed:', error);
+        throw fallbackError;
+      }
     }
+  }
+
+  async function fetchSheetRowsViaGviz() {
+    const gvizUrl = `https://docs.google.com/spreadsheets/d/${GOOGLE_SHEET_ID}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent(GOOGLE_SHEET_TAB_NAME)}&t=${Date.now()}`;
+    const response = await fetchWithTimeout(gvizUrl, { method: 'GET' });
+    if (!response.ok) {
+      throw new Error(`GViz Import fehlgeschlagen (${response.status})`);
+    }
+
+    const text = await response.text();
+    const match = text.match(/google\.visualization\.Query\.setResponse\((.*)\);?\s*$/s);
+    if (!match || !match[1]) {
+      throw new Error('Ungueltige GViz-Antwort');
+    }
+
+    const parsed = JSON.parse(match[1]);
+    const table = parsed && parsed.table ? parsed.table : null;
+    const rows = table && Array.isArray(table.rows) ? table.rows : [];
+
+    return rows.map((row) => {
+      const cells = Array.isArray(row.c) ? row.c : [];
+      const getCell = (index) => {
+        const cell = cells[index];
+        if (!cell) return '';
+        if (cell.v === null || cell.v === undefined) return '';
+        return String(cell.v);
+      };
+
+      return {
+        type: getCell(0),
+        division: getCell(1),
+        recipient: getCell(2),
+        amount: getCell(3),
+        purpose: getCell(4),
+        status: getCell(5),
+        timestamp: getCell(6),
+        password: getCell(7)
+      };
+    }).filter((row) => row.type);
   }
 
   function startRemoteSyncPolling() {
