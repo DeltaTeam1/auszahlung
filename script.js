@@ -86,6 +86,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const GOOGLE_SHEET_ID = '1caffNc0TQMuvZTdptFPRnD-5CefuS9Eqs4kr91BkDKY';
   const GOOGLE_SHEET_TAB_NAME = 'Data';
   const GOOGLE_APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbxUKzUqJ5LaLBuo6uz9bSdtG5jFygJVspw-Z5lwV992mWXv54idcjivz2dfPfc7cTSTIg/exec';
+  const DELETED_IDS_STORAGE_KEY = 'payout_deleted_ids';
   let syncInProgress = false;
   let syncRequested = false;
 
@@ -200,13 +201,20 @@ document.addEventListener('DOMContentLoaded', () => {
     try {
       const remoteState = await importFromGoogleSheet({ applyToLocal: false, suppressStatus: true });
       const localState = buildStateSnapshotFromLocalStorage();
-      const mergedState = mergeStateSnapshots(remoteState, localState);
+      const deletedIdSet = getDeletedIdSet();
+      const mergedState = mergeStateSnapshots(remoteState, localState, { deletedIdSet });
 
       applyStateSnapshotToLocalStorage(mergedState);
-      await persistToGoogleSheet(buildSheetPayload(mergedState));
+      const uploaded = await persistToGoogleSheet(buildSheetPayload(mergedState));
+      if (uploaded) {
+        clearDeletedIds();
+      }
     } catch (error) {
       console.warn('Remote merge before save failed, trying direct upload:', error);
-      await persistToGoogleSheet(buildSheetPayload());
+      const uploaded = await persistToGoogleSheet(buildSheetPayload());
+      if (uploaded) {
+        clearDeletedIds();
+      }
     }
   }
 
@@ -241,7 +249,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (!GOOGLE_APPS_SCRIPT_URL) {
       setSyncStatus('synced', 'Im Feldspeicher gesichert');
-      return;
+      return true;
     }
 
     try {
@@ -257,6 +265,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const body = await response.json().catch(() => ({}));
       if (body && body.ok) {
         setSyncStatus('synced', 'Gefechtsdatenbank synchronisiert');
+        return true;
       } else {
         throw new Error(body && body.error ? body.error : 'Unbekannter Fehler beim Export');
       }
@@ -265,6 +274,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const reason = error && error.message ? error.message : 'Unbekannter Fehler';
       setSyncStatus('offline', `Datenfunk-Upload fehlgeschlagen: ${reason}`);
       showToast(`Datenfunk-Upload fehlgeschlagen: ${reason}`, 'warning');
+      return false;
     }
   }
 
@@ -288,7 +298,28 @@ document.addEventListener('DOMContentLoaded', () => {
     };
   }
 
-  function mergeTransactionArrays(remoteTransactions = [], localTransactions = [], preferLocal = true) {
+  function getDeletedIdSet() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(DELETED_IDS_STORAGE_KEY) || '[]');
+      if (!Array.isArray(raw)) return new Set();
+      return new Set(raw.map(String));
+    } catch (error) {
+      return new Set();
+    }
+  }
+
+  function addDeletedId(id) {
+    if (!id) return;
+    const deleted = getDeletedIdSet();
+    deleted.add(String(id));
+    localStorage.setItem(DELETED_IDS_STORAGE_KEY, JSON.stringify(Array.from(deleted)));
+  }
+
+  function clearDeletedIds() {
+    localStorage.removeItem(DELETED_IDS_STORAGE_KEY);
+  }
+
+  function mergeTransactionArrays(remoteTransactions = [], localTransactions = [], preferLocal = true, deletedIdSet = new Set()) {
     const map = new Map();
 
     const first = preferLocal ? remoteTransactions : localTransactions;
@@ -296,11 +327,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
     first.forEach(item => {
       const normalized = normalizeTransactionEntry(item);
+      if (deletedIdSet.has(normalized.id)) return;
       map.set(normalized.id, normalized);
     });
 
     second.forEach(item => {
       const normalized = normalizeTransactionEntry(item);
+      if (deletedIdSet.has(normalized.id)) return;
       map.set(normalized.id, normalized);
     });
 
@@ -308,7 +341,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function mergeStateSnapshots(remoteState, localState, options = {}) {
-    const { preferLocal = true } = options;
+    const { preferLocal = true, deletedIdSet = new Set() } = options;
     const merged = {
       payoutHistory: {},
       divisionPasswords: {},
@@ -318,7 +351,7 @@ document.addEventListener('DOMContentLoaded', () => {
     Object.keys(DIVISIONS).forEach(key => {
       const remoteTransactions = (remoteState && remoteState.payoutHistory && remoteState.payoutHistory[key]) || [];
       const localTransactions = (localState && localState.payoutHistory && localState.payoutHistory[key]) || [];
-      merged.payoutHistory[key] = mergeTransactionArrays(remoteTransactions, localTransactions, preferLocal);
+      merged.payoutHistory[key] = mergeTransactionArrays(remoteTransactions, localTransactions, preferLocal, deletedIdSet);
 
       const remotePassword = (remoteState && remoteState.divisionPasswords && remoteState.divisionPasswords[key]) || '';
       const localPassword = (localState && localState.divisionPasswords && localState.divisionPasswords[key]) || '';
@@ -497,7 +530,8 @@ document.addEventListener('DOMContentLoaded', () => {
       try {
         const remoteState = await importFromGoogleSheet({ applyToLocal: false, suppressStatus: true });
         const localState = buildStateSnapshotFromLocalStorage();
-        const mergedState = mergeStateSnapshots(remoteState, localState, { preferLocal: false });
+        const deletedIdSet = getDeletedIdSet();
+        const mergedState = mergeStateSnapshots(remoteState, localState, { preferLocal: false, deletedIdSet });
         applyStateSnapshotToLocalStorage(mergedState);
         updateGlobalStats();
         if (activeDivisionId) {
@@ -864,8 +898,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const entry = sortedEntries[entryIndex];
     if (!entry) return;
 
+    const deleteId = normalizeTransactionEntry(entry).id;
+    addDeletedId(deleteId);
+
     const divisionHistory = JSON.parse(localStorage.getItem(`payout_history_${entry.divisionId}`)) || [];
-    const remainingHistory = divisionHistory.filter(h => !(h.timestamp === entry.timestamp && h.recipient === entry.recipient && parseFloat(h.amount) === parseFloat(entry.amount) && h.purpose === entry.purpose));
+    const remainingHistory = divisionHistory.filter(h => normalizeTransactionEntry(h).id !== deleteId);
     localStorage.setItem(`payout_history_${entry.divisionId}`, JSON.stringify(remainingHistory));
     renderModalStats();
     saveLocalAndSync();
