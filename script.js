@@ -82,10 +82,11 @@ document.addEventListener('DOMContentLoaded', () => {
   const syncStatusEl = document.getElementById('sync-status');
   const liveTimeEl = document.getElementById('live-time');
 
-  const GOOGLE_SHEET_URL = 'https://docs.google.com/spreadsheets/d/1caffNc0TQMuvZTdptFPRnD-5CefuS9Eqs4kr91BkDKY/edit?usp=sharing';
-  const GOOGLE_SHEET_ID = '1caffNc0TQMuvZTdptFPRnD-5CefuS9Eqs4kr91BkDKY';
+  // Google Sheets URLs werden serverseitig verwaltet und sind im Client-Code nicht sichtbar
+  const SHEET_SYNC_PROXY   = '/api/sheet-sync';   // POST  → Apps Script export
+  const SHEET_IMPORT_PROXY = '/api/sheet-import'; // GET   → Apps Script import
+  const SHEET_GVIZ_PROXY   = '/api/sheet-gviz';   // GET   → GViz fallback
   const GOOGLE_SHEET_TAB_NAME = 'Data';
-  const GOOGLE_APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbxUKzUqJ5LaLBuo6uz9bSdtG5jFygJVspw-Z5lwV992mWXv54idcjivz2dfPfc7cTSTIg/exec';
   const TOMBSTONE_DIVISION_KEY = '__deleted__';
   const DELETED_IDS_STORAGE_KEY = 'payout_deleted_ids';
   let syncInProgress = false;
@@ -251,7 +252,6 @@ document.addEventListener('DOMContentLoaded', () => {
     }));
 
     return {
-      spreadsheetUrl: GOOGLE_SHEET_URL,
       payoutHistory,
       divisionPasswords: state.divisionPasswords,
       lastUpdated: state.lastUpdated || new Date().toISOString()
@@ -260,13 +260,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function persistToGoogleSheet(payload = buildSheetPayload()) {
 
-    if (!GOOGLE_APPS_SCRIPT_URL) {
-      setSyncStatus('synced', 'Im Feldspeicher gesichert');
-      return true;
-    }
-
     try {
-      const response = await fetchWithTimeout(GOOGLE_APPS_SCRIPT_URL, {
+      const response = await fetchWithTimeout(SHEET_SYNC_PROXY, {
         method: 'POST',
         body: JSON.stringify(payload)
       });
@@ -401,7 +396,7 @@ document.addEventListener('DOMContentLoaded', () => {
   async function importFromGoogleSheet(options = {}) {
     const { applyToLocal = true, suppressStatus = false } = options;
     try {
-      const response = await fetchWithTimeout(`${GOOGLE_APPS_SCRIPT_URL}?t=${Date.now()}`, {
+      const response = await fetchWithTimeout(`${SHEET_IMPORT_PROXY}`, {
         headers: { 'Accept': 'application/json' }
       });
       if (!response.ok) throw new Error(`Import fehlgeschlagen (${response.status})`);
@@ -527,8 +522,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   async function fetchSheetRowsViaGviz() {
-    const gvizUrl = `https://docs.google.com/spreadsheets/d/${GOOGLE_SHEET_ID}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent(GOOGLE_SHEET_TAB_NAME)}&t=${Date.now()}`;
-    const response = await fetchWithTimeout(gvizUrl, { method: 'GET' });
+    const response = await fetchWithTimeout(SHEET_GVIZ_PROXY, { method: 'GET' });
     if (!response.ok) {
       throw new Error(`GViz Import fehlgeschlagen (${response.status})`);
     }
@@ -566,8 +560,6 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function startRemoteSyncPolling() {
-    if (!GOOGLE_APPS_SCRIPT_URL) return;
-
     setInterval(async () => {
       try {
         const remoteState = await importFromGoogleSheet({ applyToLocal: false, suppressStatus: true });
