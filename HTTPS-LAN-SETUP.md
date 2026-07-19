@@ -2,10 +2,43 @@
 
 ## Server starten (Host-PC)
 
+### Option 1: Ohne Zertifikat (kein Import auf anderen PCs noetig)
+
+```powershell
+.\tools\start-lan-http.cmd
+```
+
+Oder mit npm:
+
+```powershell
+npm run start:lan:http
+```
+
+Erreichbar unter:
+
+- `http://<HOST-LAN-IP>:3000`
+- Beispiel: `http://192.168.178.21:3000`
+
+Hinweis: Diese Variante ist unverschluesselt (nur im vertrauenswuerdigen lokalen Netz verwenden).
+
+### Option 2: Mit HTTPS (Zertifikat)
+
 1. Im Projektordner ausfuehren:
 
 ```powershell
 npm run start:https:lan
+```
+
+Falls `npm` auf dem Host nicht gefunden wird:
+
+```powershell
+.\tools\start-https-lan.cmd
+```
+
+Alternativ direkt per PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\start-https-lan.ps1
 ```
 
 1. App ist dann erreichbar unter:
@@ -16,6 +49,8 @@ npm run start:https:lan
 HTTP auf Port `3000` leitet automatisch auf HTTPS um.
 
 ## Zertifikat auf anderen PCs vertrauen
+
+Nur fuer Option 2 (HTTPS) erforderlich.
 
 Damit Browserwarnungen auf anderen Rechnern verschwinden, muss die Root-CA einmal importiert werden.
 

@@ -5,9 +5,12 @@
   "description": "Auszahlung-Panel mit zentralem Sync-Backend",
   "scripts": {
     "start": "node server.js",
+    "start:lan:http": "node server.js",
+    "start:lan:http:direct": "powershell -ExecutionPolicy Bypass -File tools/start-lan-http.ps1",
     "start:https": "node server.js --https",
     "start:https:strict": "set FORCE_HTTPS=1&& node server.js --https",
     "start:https:lan": "set FORCE_HTTPS=1&& set SSL_KEY_PATH=certs\\lan-key.pem&& set SSL_CERT_PATH=certs\\lan-cert.pem&& \"%ProgramFiles%\\nodejs\\node.exe\" server.js --https",
+    "start:https:lan:direct": "powershell -ExecutionPolicy Bypass -File tools/start-https-lan.ps1",
     "check:https": "powershell -ExecutionPolicy Bypass -File tools/check-https.ps1"
   },
   "dependencies": {
