@@ -203,6 +203,35 @@ function sanitizeDeletedIds(rawDeletedIds) {
   return Array.from(new Set(rawDeletedIds.map((id) => String(id).slice(0, 300)).filter(Boolean)));
 }
 
+function extractDeletedIdsFromPayload(payload = {}) {
+  const explicit = Array.isArray(payload.deleted_ids)
+    ? payload.deleted_ids
+    : Array.isArray(payload.deletedIds)
+      ? payload.deletedIds
+      : [];
+
+  const payoutHistory = payload.payoutHistory || payload.payout_history || {};
+  const tombstones = Array.isArray(payoutHistory.__deleted__)
+    ? payoutHistory.__deleted__
+        .map((row) => (row && row.recipient ? String(row.recipient) : ''))
+        .filter(Boolean)
+    : [];
+
+  return sanitizeDeletedIds([...explicit, ...tombstones]);
+}
+
+function toServerDataSnapshot(payload = {}) {
+  const payoutHistoryRaw = payload.payout_history || payload.payoutHistory || {};
+  const passwordsRaw = payload.division_passwords || payload.divisionPasswords || {};
+
+  return {
+    payout_history: sanitizePayoutHistory(payoutHistoryRaw),
+    division_passwords: sanitizeDivisionPasswords(passwordsRaw),
+    deleted_ids: extractDeletedIdsFromPayload(payload),
+    lastModified: payload.lastModified || payload.lastUpdated || new Date().toISOString()
+  };
+}
+
 function writeRemoteData(data) {
   try {
     fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
@@ -316,6 +345,13 @@ app.put('/api/payout-sync', (req, res) => {
 // --- Proxy: POST to Apps Script (export) ---
 app.post('/api/sheet-sync', (req, res) => {
   if (!GOOGLE_APPS_SCRIPT_URL) return res.status(503).json({ error: 'Apps Script nicht konfiguriert' });
+
+  // Keep local mirror in sync as automatic backup whenever clients push to Google.
+  const backupSnapshot = toServerDataSnapshot(req.body || {});
+  if (!writeRemoteData(backupSnapshot)) {
+    console.warn('Warnung: Lokales Backup konnte vor Google-Proxy nicht geschrieben werden.');
+  }
+
   proxyRequest(GOOGLE_APPS_SCRIPT_URL, 'POST', req.body, res);
 });
 

@@ -90,9 +90,13 @@ document.addEventListener('DOMContentLoaded', () => {
   const GOOGLE_SHEET_TAB_NAME = 'Data';
   const TOMBSTONE_DIVISION_KEY = '__deleted__';
   const DELETED_IDS_STORAGE_KEY = 'payout_deleted_ids';
+  const DIRTY_PASSWORDS_STORAGE_KEY = 'payout_dirty_password_divisions';
   let googleExportDisabled = false;
   let syncInProgress = false;
   let syncRequested = false;
+  let lastSuccessfulRemoteTarget = 'none';
+  let nextGoogleRetryAt = 0;
+  const GOOGLE_RETRY_COOLDOWN_MS = 30000;
 
   // --- INITIALIZATION ---
   initData().then(() => {
@@ -206,11 +210,15 @@ document.addEventListener('DOMContentLoaded', () => {
       const remoteState = await importFromRemoteSource({ applyToLocal: false, suppressStatus: true });
       const localState = buildStateSnapshotFromLocalStorage();
       const deletedIdSet = getDeletedIdSet();
+      const dirtyPasswordDivisions = getDirtyPasswordDivisionSet();
       (remoteState && remoteState.deletedIds || []).forEach((id) => deletedIdSet.add(String(id)));
-      const mergedState = mergeStateSnapshots(remoteState, localState, { deletedIdSet });
+      const mergedState = mergeStateSnapshots(remoteState, localState, { deletedIdSet, dirtyPasswordDivisions });
 
       applyStateSnapshotToLocalStorage(mergedState);
-      await persistToRemoteStore(buildSheetPayload(mergedState));
+      const persistOk = await persistToRemoteStore(buildSheetPayload(mergedState));
+      if (persistOk && lastSuccessfulRemoteTarget === 'google') {
+        clearDirtyPasswordDivisionSet();
+      }
     } catch (error) {
       console.warn('Remote merge before save failed, trying direct upload:', error);
       await persistToRemoteStore(buildSheetPayload());
@@ -298,6 +306,7 @@ document.addEventListener('DOMContentLoaded', () => {
         throw new Error(`Server-Upload fehlgeschlagen (${response.status}): ${errText}`);
       }
 
+      lastSuccessfulRemoteTarget = 'server';
       setSyncStatus('synced', 'Missionsserver synchronisiert');
       return true;
     } catch (error) {
@@ -316,6 +325,10 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   async function persistToRemoteStore(payload = buildSheetPayload()) {
+    if (googleExportDisabled && Date.now() >= nextGoogleRetryAt) {
+      googleExportDisabled = false;
+    }
+
     if (!googleExportDisabled) {
       const googleOk = await persistToGoogleSheet(payload, { suppressOffline: true });
       if (googleOk) {
@@ -382,6 +395,10 @@ document.addEventListener('DOMContentLoaded', () => {
     try {
       const response = await fetchWithTimeout(SHEET_SYNC_PROXY, {
         method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
         body: JSON.stringify(payload)
       });
 
@@ -389,6 +406,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const errText = await response.text();
         if (response.status === 405) {
           googleExportDisabled = true;
+          nextGoogleRetryAt = Date.now() + GOOGLE_RETRY_COOLDOWN_MS;
           throw new Error('Google-Export nicht erlaubt (405). Server-Sync aktiv.');
         }
         throw new Error(`Export fehlgeschlagen (${response.status}): ${errText}`);
@@ -396,6 +414,8 @@ document.addEventListener('DOMContentLoaded', () => {
       const body = await response.json().catch(() => ({}));
       if (body && body.ok) {
         googleExportDisabled = false;
+        nextGoogleRetryAt = 0;
+        lastSuccessfulRemoteTarget = 'google';
         setSyncStatus('synced', 'Gefechtsdatenbank synchronisiert');
         return true;
       } else {
@@ -451,6 +471,31 @@ document.addEventListener('DOMContentLoaded', () => {
     localStorage.setItem(DELETED_IDS_STORAGE_KEY, JSON.stringify(Array.from(deletedSet)));
   }
 
+  function getDirtyPasswordDivisionSet() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(DIRTY_PASSWORDS_STORAGE_KEY) || '[]');
+      if (!Array.isArray(raw)) return new Set();
+      return new Set(raw.map(String));
+    } catch (error) {
+      return new Set();
+    }
+  }
+
+  function setDirtyPasswordDivisionSet(dirtySet) {
+    localStorage.setItem(DIRTY_PASSWORDS_STORAGE_KEY, JSON.stringify(Array.from(dirtySet)));
+  }
+
+  function markDirtyPasswordDivision(divisionId) {
+    if (!divisionId) return;
+    const dirty = getDirtyPasswordDivisionSet();
+    dirty.add(String(divisionId));
+    setDirtyPasswordDivisionSet(dirty);
+  }
+
+  function clearDirtyPasswordDivisionSet() {
+    localStorage.removeItem(DIRTY_PASSWORDS_STORAGE_KEY);
+  }
+
   function addDeletedId(id) {
     if (!id) return;
     const deleted = getDeletedIdSet();
@@ -484,7 +529,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function mergeStateSnapshots(remoteState, localState, options = {}) {
-    const { preferLocal = true, deletedIdSet = new Set() } = options;
+    const { preferLocal = true, deletedIdSet = new Set(), dirtyPasswordDivisions = new Set() } = options;
     const merged = {
       payoutHistory: {},
       divisionPasswords: {},
@@ -499,7 +544,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
       const remotePassword = (remoteState && remoteState.divisionPasswords && remoteState.divisionPasswords[key]) || '';
       const localPassword = (localState && localState.divisionPasswords && localState.divisionPasswords[key]) || '';
-      merged.divisionPasswords[key] = preferLocal ? (localPassword || remotePassword) : (remotePassword || localPassword);
+      if (dirtyPasswordDivisions.has(key)) {
+        merged.divisionPasswords[key] = localPassword || remotePassword;
+      } else {
+        merged.divisionPasswords[key] = remotePassword || localPassword;
+      }
     });
 
     return merged;
@@ -685,7 +734,8 @@ document.addEventListener('DOMContentLoaded', () => {
         purpose: getCell(4),
         status: getCell(5),
         timestamp: getCell(6),
-        password: getCell(7)
+        password: getCell(7),
+        id: getCell(8)
       };
     }).filter((row) => row.type);
   }
@@ -702,6 +752,13 @@ document.addEventListener('DOMContentLoaded', () => {
         updateGlobalStats();
         if (activeDivisionId) {
           renderModalStats();
+        }
+
+        const hasDirtyPasswords = getDirtyPasswordDivisionSet().size > 0;
+        const needsGoogleBackfill = hasDirtyPasswords || lastSuccessfulRemoteTarget !== 'google';
+        if (needsGoogleBackfill && !syncInProgress) {
+          syncRequested = true;
+          await runSyncLoop();
         }
       } catch (error) {
         // Silent polling failure: status indicator is handled by explicit sync actions.
@@ -824,6 +881,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function setDivisionPassword(divisionId, password) {
     if (!password) return;
     localStorage.setItem(`division_password_${divisionId}`, password);
+    markDirtyPasswordDivision(divisionId);
     saveLocalAndSync();
   }
 
@@ -877,10 +935,28 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     passwordManagerList.querySelectorAll('.division-password-input').forEach(input => {
-      input.addEventListener('change', (event) => {
-        const divisionId = event.target.getAttribute('data-division');
-        setDivisionPassword(divisionId, event.target.value.trim());
-        showToast(`Passwort für ${DIVISIONS[divisionId].name} gespeichert.`, 'success');
+      const divisionId = input.getAttribute('data-division');
+      input.dataset.lastSaved = getDivisionPassword(divisionId);
+
+      const persistPassword = (event) => {
+        const target = event.target;
+        const division = target.getAttribute('data-division');
+        const value = target.value.trim();
+        if (!division || !value) return;
+        if (value === target.dataset.lastSaved) return;
+
+        setDivisionPassword(division, value);
+        target.dataset.lastSaved = value;
+        showToast(`Passwort für ${DIVISIONS[division].name} gespeichert.`, 'success');
+      };
+
+      input.addEventListener('change', persistPassword);
+      input.addEventListener('blur', persistPassword);
+      input.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          event.currentTarget.blur();
+        }
       });
     });
   }
@@ -1039,6 +1115,8 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   function updateTransactionStatus(entryIndex, newStatus) {
+    if (activeDivisionId !== 'mpy') return;
+
     const sortedEntries = getAllPayoutEntries();
     const entry = sortedEntries[entryIndex];
     if (!entry) return;
@@ -1060,6 +1138,8 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function deleteTransaction(entryIndex) {
+    if (activeDivisionId !== 'mpy') return;
+
     const sortedEntries = getAllPayoutEntries();
     const entry = sortedEntries[entryIndex];
     if (!entry) return;

@@ -14,7 +14,8 @@ function doGet(e) {
       purpose: row[4] || '',
       status: row[5] || '',
       timestamp: row[6] || '',
-      password: row[7] || ''
+      password: row[7] || '',
+      id: row[8] || ''
     })).filter((row) => row.type);
 
     return ContentService.createTextOutput(JSON.stringify({ ok: true, data }))
@@ -26,7 +27,9 @@ function doGet(e) {
 }
 
 function doPost(e) {
+  const lock = LockService.getScriptLock();
   try {
+    lock.waitLock(30000);
     const payload = JSON.parse(e.postData.contents || '{}');
     const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
     let sheet = ss.getSheetByName(SHEET_NAME);
@@ -35,36 +38,52 @@ function doPost(e) {
       sheet = ss.insertSheet(SHEET_NAME);
     }
 
-    sheet.clearContents();
-    sheet.appendRow(['type', 'division', 'recipient', 'amount', 'purpose', 'status', 'timestamp', 'password']);
+    const rows = [
+      ['type', 'division', 'recipient', 'amount', 'purpose', 'status', 'timestamp', 'password', 'id']
+    ];
 
     const divisionPasswords = payload.divisionPasswords || {};
     Object.keys(divisionPasswords).forEach((division) => {
       const password = divisionPasswords[division] || '';
-      sheet.appendRow(['password', division, '', '', '', '', '', password]);
+      rows.push(['password', division, '', '', '', '', '', password, '']);
     });
 
     const payoutHistory = payload.payoutHistory || {};
     Object.keys(payoutHistory).forEach((division) => {
       const entries = payoutHistory[division] || [];
       entries.forEach((entry) => {
-        sheet.appendRow([
+        const recipient = entry.recipient || '';
+        const amount = entry.amount || '';
+        const purpose = entry.purpose || '';
+        const timestamp = entry.timestamp || '';
+        const stableId = entry.id || [recipient, amount, purpose, timestamp].join('|');
+
+        rows.push([
           'transaction',
           division,
-          entry.recipient || '',
-          entry.amount || '',
-          entry.purpose || '',
+          recipient,
+          amount,
+          purpose,
           entry.status || 'Bearbeitung',
-          entry.timestamp || '',
-          ''
+          timestamp,
+          '',
+          stableId
         ]);
       });
     });
+
+    sheet.clearContents();
+    sheet.getRange(1, 1, rows.length, rows[0].length).setValues(rows);
 
     return ContentService.createTextOutput(JSON.stringify({ ok: true, message: 'Saved to Google Sheet.' }))
       .setMimeType(ContentService.MimeType.JSON);
   } catch (error) {
     return ContentService.createTextOutput(JSON.stringify({ ok: false, error: error.toString() }))
       .setMimeType(ContentService.MimeType.JSON);
+  } finally {
+    try {
+      lock.releaseLock();
+    } catch (e) {
+    }
   }
 }
