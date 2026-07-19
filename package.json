@@ -4,10 +4,17 @@
   "private": true,
   "description": "Auszahlung-Panel mit zentralem Sync-Backend",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "start:https": "node server.js --https",
+    "start:https:strict": "set FORCE_HTTPS=1&& node server.js --https",
+    "start:https:lan": "set FORCE_HTTPS=1&& set SSL_KEY_PATH=certs\\lan-key.pem&& set SSL_CERT_PATH=certs\\lan-cert.pem&& \"%ProgramFiles%\\nodejs\\node.exe\" server.js --https",
+    "check:https": "powershell -ExecutionPolicy Bypass -File tools/check-https.ps1"
   },
   "dependencies": {
     "cors": "^2.8.5",
-    "express": "^4.21.2"
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.4.1",
+    "helmet": "^7.1.0",
+    "selfsigned": "^2.4.1"
   }
 }

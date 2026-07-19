@@ -2,12 +2,21 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const cors = require('cors');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
+const selfsigned = require('selfsigned');
 const https = require('https');
 const http = require('http');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const HTTPS_PORT = parseInt(process.env.HTTPS_PORT || '3443', 10);
+const ENABLE_HTTPS = process.argv.includes('--https') || ['1', 'true', 'yes'].includes(String(process.env.ENABLE_HTTPS || '').toLowerCase());
+const FORCE_HTTPS = ['1', 'true', 'yes'].includes(String(process.env.FORCE_HTTPS || '').toLowerCase());
+const SSL_KEY_PATH = process.env.SSL_KEY_PATH || path.join(__dirname, 'certs', 'server-key.pem');
+const SSL_CERT_PATH = process.env.SSL_CERT_PATH || path.join(__dirname, 'certs', 'server-cert.pem');
 const DATA_FILE = path.join(__dirname, 'remote-payout-data.json');
+const DIVISION_KEYS = ['hr', 'sf', 'mp', 'af', 'inf', 'mpy'];
 
 // --- Google Sheets credentials (server-side only, never exposed to client) ---
 const GOOGLE_SHEET_ID = process.env.GOOGLE_SHEET_ID || '1caffNc0TQMuvZTdptFPRnD-5CefuS9Eqs4kr91BkDKY';
@@ -35,9 +44,68 @@ const DEFAULT_DATA = {
   lastModified: new Date().toISOString()
 };
 
-app.use(cors());
+app.disable('x-powered-by');
+app.set('trust proxy', 1);
+
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      imgSrc: ["'self'", 'data:'],
+      connectSrc: ["'self'"],
+      objectSrc: ["'none'"],
+      baseUri: ["'self'"],
+      frameAncestors: ["'none'"]
+    }
+  },
+  crossOriginEmbedderPolicy: false
+}));
+
+app.use(cors({
+  origin: true,
+  methods: ['GET', 'POST', 'PUT', 'OPTIONS'],
+  allowedHeaders: ['Content-Type']
+}));
+
 app.use(express.json({ limit: '2mb' }));
-app.use(express.static(__dirname));
+
+const apiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 240,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Zu viele Anfragen. Bitte kurz warten.' }
+});
+
+app.use('/api/', apiLimiter);
+
+app.use((req, res, next) => {
+  if (req.path.startsWith('/api/')) {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+  }
+  next();
+});
+
+app.use(express.static(__dirname, {
+  etag: true,
+  lastModified: true,
+  setHeaders: (res, filePath) => {
+    const ext = path.extname(filePath).toLowerCase();
+    if (ext === '.html') {
+      res.setHeader('Cache-Control', 'no-store');
+      return;
+    }
+    if (ext === '.js' || ext === '.css') {
+      res.setHeader('Cache-Control', 'no-cache, must-revalidate');
+      return;
+    }
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+  }
+}));
 
 // Helper: forward a request to an external URL and pipe the response back
 function proxyRequest(targetUrl, method, body, res) {
@@ -87,6 +155,54 @@ function readRemoteData() {
   }
 }
 
+function sanitizeTransaction(row) {
+  if (!row || typeof row !== 'object') return null;
+
+  const recipient = row.recipient ? String(row.recipient).slice(0, 200) : '';
+  const purpose = row.purpose ? String(row.purpose).slice(0, 500) : '';
+  const status = row.status ? String(row.status).slice(0, 50) : 'Bearbeitung';
+  const timestamp = row.timestamp ? String(row.timestamp) : new Date().toISOString();
+  const id = row.id ? String(row.id).slice(0, 300) : `${recipient}|${row.amount || 0}|${purpose}|${timestamp}`;
+  const amountNum = Number(row.amount);
+  const amount = Number.isFinite(amountNum) ? amountNum : 0;
+
+  if (!recipient) return null;
+
+  return {
+    id,
+    recipient,
+    amount,
+    purpose,
+    status,
+    timestamp
+  };
+}
+
+function sanitizePayoutHistory(rawHistory) {
+  const safeHistory = {};
+  DIVISION_KEYS.forEach((key) => {
+    const rows = rawHistory && Array.isArray(rawHistory[key]) ? rawHistory[key] : [];
+    safeHistory[key] = rows
+      .map(sanitizeTransaction)
+      .filter(Boolean);
+  });
+  return safeHistory;
+}
+
+function sanitizeDivisionPasswords(rawPasswords) {
+  const safePasswords = {};
+  DIVISION_KEYS.forEach((key) => {
+    const value = rawPasswords && rawPasswords[key] ? String(rawPasswords[key]) : '';
+    safePasswords[key] = value.slice(0, 200);
+  });
+  return safePasswords;
+}
+
+function sanitizeDeletedIds(rawDeletedIds) {
+  if (!Array.isArray(rawDeletedIds)) return [];
+  return Array.from(new Set(rawDeletedIds.map((id) => String(id).slice(0, 300)).filter(Boolean)));
+}
+
 function writeRemoteData(data) {
   try {
     fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
@@ -95,6 +211,81 @@ function writeRemoteData(data) {
     console.error('Fehler beim Schreiben der Remote-Daten:', error);
     return false;
   }
+}
+
+function ensureHttpsCredentials() {
+  if (fs.existsSync(SSL_KEY_PATH) && fs.existsSync(SSL_CERT_PATH)) {
+    return {
+      key: fs.readFileSync(SSL_KEY_PATH),
+      cert: fs.readFileSync(SSL_CERT_PATH)
+    };
+  }
+
+  const certDir = path.dirname(SSL_KEY_PATH);
+  if (!fs.existsSync(certDir)) {
+    fs.mkdirSync(certDir, { recursive: true });
+  }
+
+  const attrs = [{ name: 'commonName', value: 'localhost' }];
+  const pems = selfsigned.generate(attrs, {
+    keySize: 2048,
+    days: 365,
+    algorithm: 'sha256',
+    extensions: [
+      {
+        name: 'subjectAltName',
+        altNames: [
+          { type: 2, value: 'localhost' },
+          { type: 2, value: '127.0.0.1' }
+        ]
+      }
+    ]
+  });
+
+  fs.writeFileSync(SSL_KEY_PATH, pems.private, { mode: 0o600 });
+  fs.writeFileSync(SSL_CERT_PATH, pems.cert, { mode: 0o644 });
+
+  console.warn('HTTPS Zertifikat automatisch erzeugt:', SSL_CERT_PATH);
+  console.warn('Hinweis: Dieses Zertifikat ist selbstsigniert und muss ggf. im Browser bestaetigt werden.');
+
+  return {
+    key: pems.private,
+    cert: pems.cert
+  };
+}
+
+function startHttpServer() {
+  const server = http.createServer(app);
+  server.listen(PORT, () => {
+    console.log(`Auszahlung Sync-Server läuft auf http://localhost:${PORT}`);
+  });
+  return server;
+}
+
+function startHttpsServer() {
+  const credentials = ensureHttpsCredentials();
+  const server = https.createServer(credentials, app);
+  server.listen(HTTPS_PORT, () => {
+    console.log(`Auszahlung Sync-Server läuft auf https://localhost:${HTTPS_PORT}`);
+  });
+  return server;
+}
+
+function startHttpRedirectServer() {
+  const redirectApp = express();
+  redirectApp.disable('x-powered-by');
+  redirectApp.use((req, res) => {
+    const hostHeader = req.headers.host || `localhost:${PORT}`;
+    const hostWithoutPort = hostHeader.split(':')[0] || 'localhost';
+    const target = `https://${hostWithoutPort}:${HTTPS_PORT}${req.originalUrl}`;
+    res.redirect(308, target);
+  });
+
+  const server = http.createServer(redirectApp);
+  server.listen(PORT, () => {
+    console.log(`HTTP Redirect aktiv auf http://localhost:${PORT} -> https://localhost:${HTTPS_PORT}`);
+  });
+  return server;
 }
 
 app.get('/api/payout-sync', (req, res) => {
@@ -109,9 +300,9 @@ app.put('/api/payout-sync', (req, res) => {
   }
 
   const updatedData = {
-    payout_history: payload.payout_history || DEFAULT_DATA.payout_history,
-    division_passwords: payload.division_passwords || DEFAULT_DATA.division_passwords,
-    deleted_ids: Array.isArray(payload.deleted_ids) ? payload.deleted_ids : [],
+    payout_history: sanitizePayoutHistory(payload.payout_history),
+    division_passwords: sanitizeDivisionPasswords(payload.division_passwords),
+    deleted_ids: sanitizeDeletedIds(payload.deleted_ids),
     lastModified: payload.lastModified || new Date().toISOString()
   };
 
@@ -141,9 +332,16 @@ app.get('/api/sheet-gviz', (req, res) => {
   proxyRequest(gvizUrl, 'GET', null, res);
 });
 
-app.listen(PORT, () => {
-  console.log(`Auszahlung Sync-Server läuft auf http://localhost:${PORT}`);
-});
+if (ENABLE_HTTPS) {
+  startHttpsServer();
+  if (FORCE_HTTPS) {
+    startHttpRedirectServer();
+  } else {
+    startHttpServer();
+  }
+} else {
+  startHttpServer();
+}
 
 process.on('uncaughtException', (error) => {
   console.error('Uncaught Exception:', error);
