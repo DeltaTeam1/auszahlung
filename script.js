@@ -90,6 +90,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const GOOGLE_SHEET_TAB_NAME = 'Data';
   const TOMBSTONE_DIVISION_KEY = '__deleted__';
   const DELETED_IDS_STORAGE_KEY = 'payout_deleted_ids';
+  let googleExportDisabled = false;
   let syncInProgress = false;
   let syncRequested = false;
 
@@ -315,9 +316,11 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   async function persistToRemoteStore(payload = buildSheetPayload()) {
-    const googleOk = await persistToGoogleSheet(payload, { suppressOffline: true });
-    if (googleOk) {
-      return true;
+    if (!googleExportDisabled) {
+      const googleOk = await persistToGoogleSheet(payload, { suppressOffline: true });
+      if (googleOk) {
+        return true;
+      }
     }
 
     const serverOk = await persistToServerStore(payload);
@@ -384,10 +387,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
       if (!response.ok) {
         const errText = await response.text();
+        if (response.status === 405) {
+          googleExportDisabled = true;
+          throw new Error('Google-Export nicht erlaubt (405). Server-Sync aktiv.');
+        }
         throw new Error(`Export fehlgeschlagen (${response.status}): ${errText}`);
       }
       const body = await response.json().catch(() => ({}));
       if (body && body.ok) {
+        googleExportDisabled = false;
         setSyncStatus('synced', 'Gefechtsdatenbank synchronisiert');
         return true;
       } else {
@@ -397,8 +405,13 @@ document.addEventListener('DOMContentLoaded', () => {
       console.warn('Google Sheet export failed:', error);
       const reason = error && error.message ? error.message : 'Unbekannter Fehler';
       if (!suppressOffline) {
-        setSyncStatus('offline', `Datenfunk-Upload fehlgeschlagen: ${reason}`);
-        showToast(`Datenfunk-Upload fehlgeschlagen: ${reason}`, 'warning');
+        if (googleExportDisabled) {
+          setSyncStatus('synced', 'Missionsserver synchronisiert');
+          showToast('Google-Upload deaktiviert (405). Missionsserver-Sync aktiv.', 'warning');
+        } else {
+          setSyncStatus('offline', 'Datenfunk-Upload fehlgeschlagen');
+          showToast(`Datenfunk-Upload fehlgeschlagen: ${reason}`, 'warning');
+        }
       }
       return false;
     }
