@@ -1,5 +1,8 @@
 # HTTPS LAN Setup
 
+Hinweis: Dieses Dokument beschreibt den Betrieb im lokalen Netzwerk mit laufendem Host-PC.
+Wenn das System auch bei ausgeschaltetem PC verfuegbar sein soll, nutze die Cloud-Variante in `CLOUD-24-7-SETUP.md`.
+
 ## Server starten (Host-PC)
 
 ### Option 1: Ohne Zertifikat (kein Import auf anderen PCs noetig)

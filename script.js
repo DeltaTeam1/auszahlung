@@ -82,11 +82,43 @@ document.addEventListener('DOMContentLoaded', () => {
   const syncStatusEl = document.getElementById('sync-status');
   const liveTimeEl = document.getElementById('live-time');
 
-  // Google Sheets URLs werden serverseitig verwaltet und sind im Client-Code nicht sichtbar
-  const SHEET_SYNC_PROXY   = '/api/sheet-sync';   // POST  → Apps Script export
-  const SHEET_IMPORT_PROXY = '/api/sheet-import'; // GET   → Apps Script import
-  const SHEET_GVIZ_PROXY   = '/api/sheet-gviz';   // GET   → GViz fallback
-  const SERVER_SYNC_PROXY  = '/api/payout-sync';  // GET/PUT → server fallback store
+  // Runtime sync config:
+  // - Local mode: use the local Node proxy endpoints (/api/*)
+  // - Always-on mode: call Google Apps Script directly (works on static hosting without local PC)
+  const DEFAULT_APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbxUKzUqJ5LaLBuo6uz9bSdtG5jFygJVspw-Z5lwV992mWXv54idcjivz2dfPfc7cTSTIg/exec';
+  const DEFAULT_SHEET_ID = '1caffNc0TQMuvZTdptFPRnD-5CefuS9Eqs4kr91BkDKY';
+  const runtimeConfig = (window.AUSZAHLUNG_CONFIG && typeof window.AUSZAHLUNG_CONFIG === 'object')
+    ? window.AUSZAHLUNG_CONFIG
+    : {};
+
+  const normalizedApiBase = runtimeConfig.apiBaseUrl ? String(runtimeConfig.apiBaseUrl).replace(/\/$/, '') : '';
+  const isLocalHost = ['localhost', '127.0.0.1', '::1'].includes(window.location.hostname);
+  const useDirectSyncByUrl = new URLSearchParams(window.location.search).get('directSync') === '1';
+  const useDirectSyncByConfig = Boolean(runtimeConfig.forceDirectSync);
+  const isLikelyStaticHost = !isLocalHost && !normalizedApiBase;
+  const USE_DIRECT_GOOGLE_SYNC = useDirectSyncByUrl || useDirectSyncByConfig || isLikelyStaticHost;
+
+  const APPS_SCRIPT_URL = String(
+    runtimeConfig.appsScriptUrl
+    || localStorage.getItem('apps_script_url')
+    || DEFAULT_APPS_SCRIPT_URL
+  ).trim();
+
+  const GOOGLE_SHEET_ID = String(
+    runtimeConfig.googleSheetId
+    || localStorage.getItem('google_sheet_id')
+    || DEFAULT_SHEET_ID
+  ).trim();
+
+  const apiUrl = (route) => `${normalizedApiBase}${route}`;
+
+  const SHEET_SYNC_PROXY = USE_DIRECT_GOOGLE_SYNC ? APPS_SCRIPT_URL : apiUrl('/api/sheet-sync');
+  const SHEET_IMPORT_PROXY = USE_DIRECT_GOOGLE_SYNC ? APPS_SCRIPT_URL : apiUrl('/api/sheet-import');
+  const SHEET_GVIZ_PROXY = USE_DIRECT_GOOGLE_SYNC
+    ? `https://docs.google.com/spreadsheets/d/${GOOGLE_SHEET_ID}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent('Data')}`
+    : apiUrl('/api/sheet-gviz');
+  const SERVER_SYNC_PROXY = apiUrl('/api/payout-sync');  // GET/PUT → server fallback store
+  const CAN_USE_SERVER_FALLBACK = !USE_DIRECT_GOOGLE_SYNC || Boolean(normalizedApiBase);
   const GOOGLE_SHEET_TAB_NAME = 'Data';
   const TOMBSTONE_DIVISION_KEY = '__deleted__';
   const DELETED_IDS_STORAGE_KEY = 'payout_deleted_ids';
@@ -119,6 +151,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     try {
       await importFromRemoteSource();
+      if (USE_DIRECT_GOOGLE_SYNC) {
+        setSyncStatus('synced', 'Cloud-Sync aktiv (ohne Host-PC)');
+      }
     } catch (error) {
       console.warn('Initial remote import failed:', error);
       setSyncStatus('offline', 'Feldfunk getrennt, lokaler Speicher aktiv');
@@ -319,6 +354,9 @@ document.addEventListener('DOMContentLoaded', () => {
     try {
       return await importFromGoogleSheet(options);
     } catch (googleError) {
+      if (!CAN_USE_SERVER_FALLBACK) {
+        throw googleError;
+      }
       console.warn('Google import unavailable, fallback to server store:', googleError);
       return importFromServerStore(options);
     }
@@ -336,9 +374,11 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     }
 
-    const serverOk = await persistToServerStore(payload);
-    if (serverOk) {
-      return true;
+    if (CAN_USE_SERVER_FALLBACK) {
+      const serverOk = await persistToServerStore(payload);
+      if (serverOk) {
+        return true;
+      }
     }
 
     setSyncStatus('offline', 'Feldfunk getrennt, lokaler Speicher aktiv');
@@ -393,12 +433,20 @@ document.addEventListener('DOMContentLoaded', () => {
     const { suppressOffline = false } = options;
 
     try {
+      const headers = {
+        'Accept': 'application/json'
+      };
+
+      // text/plain keeps the request "simple" for direct cross-origin Apps Script calls.
+      if (USE_DIRECT_GOOGLE_SYNC) {
+        headers['Content-Type'] = 'text/plain;charset=utf-8';
+      } else {
+        headers['Content-Type'] = 'application/json';
+      }
+
       const response = await fetchWithTimeout(SHEET_SYNC_PROXY, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json'
-        },
+        headers,
         body: JSON.stringify(payload)
       });
 
@@ -576,7 +624,8 @@ document.addEventListener('DOMContentLoaded', () => {
   async function importFromGoogleSheet(options = {}) {
     const { applyToLocal = true, suppressStatus = false } = options;
     try {
-      const response = await fetchWithTimeout(`${SHEET_IMPORT_PROXY}`, {
+      const importUrl = `${SHEET_IMPORT_PROXY}${SHEET_IMPORT_PROXY.includes('?') ? '&' : '?'}t=${Date.now()}`;
+      const response = await fetchWithTimeout(importUrl, {
         headers: { 'Accept': 'application/json' }
       });
       if (!response.ok) throw new Error(`Import fehlgeschlagen (${response.status})`);
@@ -586,13 +635,7 @@ document.addEventListener('DOMContentLoaded', () => {
         throw new Error(body && body.error ? body.error : 'No valid import payload from Apps Script');
       }
 
-      let data = body.data || null;
-
-      // Some Apps Script deployments only return a status message on GET.
-      // In that case, read the public sheet rows through gviz as a fallback.
-      if (!Array.isArray(data)) {
-        data = await fetchSheetRowsViaGviz();
-      }
+      const data = body.data || null;
 
       if (!data || !Array.isArray(data)) {
         if (!suppressStatus) {
@@ -645,6 +688,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
       return importedState;
     } catch (error) {
+      if (USE_DIRECT_GOOGLE_SYNC) {
+        console.warn('Direkter Google Sheet Import fehlgeschlagen:', error);
+        throw error;
+      }
+
       try {
         const fallbackData = await fetchSheetRowsViaGviz();
         if (!Array.isArray(fallbackData)) {
