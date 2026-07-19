@@ -2,8 +2,12 @@
   "name": "auszahlung-panel",
   "version": "1.0.0",
   "private": true,
-  "description": "Statisches Auszahlung-Panel ohne Backend",
+  "description": "Auszahlung-Panel mit zentralem Sync-Backend",
   "scripts": {
-    "start": "python -m http.server 8000"
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.2"
   }
 }

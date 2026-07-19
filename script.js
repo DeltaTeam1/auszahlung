@@ -86,6 +86,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const SHEET_SYNC_PROXY   = '/api/sheet-sync';   // POST  → Apps Script export
   const SHEET_IMPORT_PROXY = '/api/sheet-import'; // GET   → Apps Script import
   const SHEET_GVIZ_PROXY   = '/api/sheet-gviz';   // GET   → GViz fallback
+  const SERVER_SYNC_PROXY  = '/api/payout-sync';  // GET/PUT → server fallback store
   const GOOGLE_SHEET_TAB_NAME = 'Data';
   const TOMBSTONE_DIVISION_KEY = '__deleted__';
   const DELETED_IDS_STORAGE_KEY = 'payout_deleted_ids';
@@ -112,9 +113,9 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     try {
-      await importFromGoogleSheet();
+      await importFromRemoteSource();
     } catch (error) {
-      console.warn('Google Sheet import failed:', error);
+      console.warn('Initial remote import failed:', error);
       setSyncStatus('offline', 'Feldfunk getrennt, lokaler Speicher aktiv');
     }
   }
@@ -201,18 +202,132 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function performSyncCycle() {
     try {
-      const remoteState = await importFromGoogleSheet({ applyToLocal: false, suppressStatus: true });
+      const remoteState = await importFromRemoteSource({ applyToLocal: false, suppressStatus: true });
       const localState = buildStateSnapshotFromLocalStorage();
       const deletedIdSet = getDeletedIdSet();
       (remoteState && remoteState.deletedIds || []).forEach((id) => deletedIdSet.add(String(id)));
       const mergedState = mergeStateSnapshots(remoteState, localState, { deletedIdSet });
 
       applyStateSnapshotToLocalStorage(mergedState);
-      await persistToGoogleSheet(buildSheetPayload(mergedState));
+      await persistToRemoteStore(buildSheetPayload(mergedState));
     } catch (error) {
       console.warn('Remote merge before save failed, trying direct upload:', error);
-      await persistToGoogleSheet(buildSheetPayload());
+      await persistToRemoteStore(buildSheetPayload());
     }
+  }
+
+  function normalizeRemoteSnapshot(payload = {}) {
+    const payoutHistory = payload.payoutHistory || payload.payout_history || {};
+    const divisionPasswords = payload.divisionPasswords || payload.division_passwords || {};
+    const deletedIds = payload.deletedIds || payload.deleted_ids || [];
+    const tombstones = Array.isArray(payoutHistory[TOMBSTONE_DIVISION_KEY])
+      ? payoutHistory[TOMBSTONE_DIVISION_KEY]
+          .map((row) => row && row.recipient ? String(row.recipient) : '')
+          .filter(Boolean)
+      : [];
+
+    const normalized = {
+      payoutHistory: {},
+      divisionPasswords: {},
+      deletedIds: Array.from(new Set([
+        ...(Array.isArray(deletedIds) ? deletedIds.map(String) : []),
+        ...tombstones
+      ])),
+      lastUpdated: payload.lastUpdated || payload.lastModified || new Date().toISOString()
+    };
+
+    Object.keys(DIVISIONS).forEach((key) => {
+      const transactions = Array.isArray(payoutHistory[key]) ? payoutHistory[key] : [];
+      normalized.payoutHistory[key] = transactions.map(normalizeTransactionEntry);
+      normalized.divisionPasswords[key] = divisionPasswords[key] ? String(divisionPasswords[key]) : '';
+    });
+
+    return normalized;
+  }
+
+  function snapshotToServerPayload(snapshot = null) {
+    const state = snapshot || buildStateSnapshotFromLocalStorage();
+    return {
+      payout_history: state.payoutHistory,
+      division_passwords: state.divisionPasswords,
+      deleted_ids: state.deletedIds || [],
+      lastModified: state.lastUpdated || new Date().toISOString()
+    };
+  }
+
+  async function importFromServerStore(options = {}) {
+    const { applyToLocal = true, suppressStatus = false } = options;
+    const response = await fetchWithTimeout(SERVER_SYNC_PROXY, {
+      method: 'GET',
+      headers: { 'Accept': 'application/json' }
+    });
+
+    if (!response.ok) {
+      throw new Error(`Server-Import fehlgeschlagen (${response.status})`);
+    }
+
+    const body = await response.json().catch(() => null);
+    if (!body || typeof body !== 'object') {
+      throw new Error('Ungueltige Server-Antwort');
+    }
+
+    const normalized = normalizeRemoteSnapshot(body);
+    if (applyToLocal) {
+      applyStateSnapshotToLocalStorage(normalized);
+    }
+
+    if (!suppressStatus) {
+      setSyncStatus('synced', 'Missionsserver synchronisiert');
+    }
+
+    return normalized;
+  }
+
+  async function persistToServerStore(payload = buildSheetPayload()) {
+    try {
+      const normalized = normalizeRemoteSnapshot(payload);
+      const response = await fetchWithTimeout(SERVER_SYNC_PROXY, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(snapshotToServerPayload(normalized))
+      });
+
+      if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(`Server-Upload fehlgeschlagen (${response.status}): ${errText}`);
+      }
+
+      setSyncStatus('synced', 'Missionsserver synchronisiert');
+      return true;
+    } catch (error) {
+      console.warn('Server sync failed:', error);
+      return false;
+    }
+  }
+
+  async function importFromRemoteSource(options = {}) {
+    try {
+      return await importFromGoogleSheet(options);
+    } catch (googleError) {
+      console.warn('Google import unavailable, fallback to server store:', googleError);
+      return importFromServerStore(options);
+    }
+  }
+
+  async function persistToRemoteStore(payload = buildSheetPayload()) {
+    const googleOk = await persistToGoogleSheet(payload, { suppressOffline: true });
+    if (googleOk) {
+      return true;
+    }
+
+    const serverOk = await persistToServerStore(payload);
+    if (serverOk) {
+      return true;
+    }
+
+    setSyncStatus('offline', 'Feldfunk getrennt, lokaler Speicher aktiv');
+    showToast('Synchronisierung fehlgeschlagen: nur lokaler Speicher aktiv', 'warning');
+    return false;
   }
 
   function buildStateSnapshotFromLocalStorage() {
@@ -258,7 +373,8 @@ document.addEventListener('DOMContentLoaded', () => {
     };
   }
 
-  async function persistToGoogleSheet(payload = buildSheetPayload()) {
+  async function persistToGoogleSheet(payload = buildSheetPayload(), options = {}) {
+    const { suppressOffline = false } = options;
 
     try {
       const response = await fetchWithTimeout(SHEET_SYNC_PROXY, {
@@ -280,8 +396,10 @@ document.addEventListener('DOMContentLoaded', () => {
     } catch (error) {
       console.warn('Google Sheet export failed:', error);
       const reason = error && error.message ? error.message : 'Unbekannter Fehler';
-      setSyncStatus('offline', `Datenfunk-Upload fehlgeschlagen: ${reason}`);
-      showToast(`Datenfunk-Upload fehlgeschlagen: ${reason}`, 'warning');
+      if (!suppressOffline) {
+        setSyncStatus('offline', `Datenfunk-Upload fehlgeschlagen: ${reason}`);
+        showToast(`Datenfunk-Upload fehlgeschlagen: ${reason}`, 'warning');
+      }
       return false;
     }
   }
@@ -562,7 +680,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function startRemoteSyncPolling() {
     setInterval(async () => {
       try {
-        const remoteState = await importFromGoogleSheet({ applyToLocal: false, suppressStatus: true });
+        const remoteState = await importFromRemoteSource({ applyToLocal: false, suppressStatus: true });
         const localState = buildStateSnapshotFromLocalStorage();
         const deletedIdSet = getDeletedIdSet();
         (remoteState && remoteState.deletedIds || []).forEach((id) => deletedIdSet.add(String(id)));

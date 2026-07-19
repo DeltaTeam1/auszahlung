@@ -31,11 +31,13 @@ const DEFAULT_DATA = {
     inf: '',
     mpy: ''
   },
+  deleted_ids: [],
   lastModified: new Date().toISOString()
 };
 
 app.use(cors());
 app.use(express.json({ limit: '2mb' }));
+app.use(express.static(__dirname));
 
 // Helper: forward a request to an external URL and pipe the response back
 function proxyRequest(targetUrl, method, body, res) {
@@ -72,7 +74,13 @@ function readRemoteData() {
       return DEFAULT_DATA;
     }
     const raw = fs.readFileSync(DATA_FILE, 'utf8');
-    return JSON.parse(raw || JSON.stringify(DEFAULT_DATA));
+    const parsed = JSON.parse(raw || JSON.stringify(DEFAULT_DATA));
+    return {
+      payout_history: parsed.payout_history || DEFAULT_DATA.payout_history,
+      division_passwords: parsed.division_passwords || DEFAULT_DATA.division_passwords,
+      deleted_ids: Array.isArray(parsed.deleted_ids) ? parsed.deleted_ids : [],
+      lastModified: parsed.lastModified || new Date().toISOString()
+    };
   } catch (error) {
     console.error('Fehler beim Lesen der Remote-Daten:', error);
     return DEFAULT_DATA;
@@ -103,6 +111,7 @@ app.put('/api/payout-sync', (req, res) => {
   const updatedData = {
     payout_history: payload.payout_history || DEFAULT_DATA.payout_history,
     division_passwords: payload.division_passwords || DEFAULT_DATA.division_passwords,
+    deleted_ids: Array.isArray(payload.deleted_ids) ? payload.deleted_ids : [],
     lastModified: payload.lastModified || new Date().toISOString()
   };
 
