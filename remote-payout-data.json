@@ -8,13 +8,21 @@
     "mpy": []
   },
   "division_passwords": {
-    "hr": "",
-    "sf": "",
+    "hr": "1234",
+    "sf": "ASSCAM0102",
     "mp": "",
     "af": "",
     "inf": "",
     "mpy": ""
   },
-  "deleted_ids": [],
-  "lastModified": "2026-07-19T18:07:57.5574595+02:00"
+  "deleted_ids": [
+    "DelLock-1784127709068|999|delete lock test|2026-07-15T15:01:53.192Z",
+    "safdsa|12312|test|2026-07-15T14:51:55.438Z",
+    "FinalSync-1784124641990|444|final sync verify|2026-07-15T14:10:43.195Z",
+    "Client2-1784124607789|333|client2 broadcast|2026-07-15T14:10:08.995Z",
+    "ErrTrace-1784124546473|223|error trace submit|2026-07-15T14:09:07.676Z",
+    "LocalFix-1784124526447|222|local fixed flow|2026-07-15T14:08:47.651Z",
+    "test|11|asdasd|2026-07-19T16:42:07.054Z"
+  ],
+  "lastModified": "2026-07-19T16:43:32.019Z"
 }
