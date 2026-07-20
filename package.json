@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "auszahlung-panel",
   "version": "1.0.0",
   "private": true,
@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "cors": "^2.8.5",
+    "dotenv": "^17.4.2",
     "express": "^4.21.2",
     "express-rate-limit": "^7.4.1",
     "helmet": "^7.1.0",

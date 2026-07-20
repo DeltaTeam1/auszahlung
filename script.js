@@ -83,52 +83,20 @@ document.addEventListener('DOMContentLoaded', () => {
   const liveTimeEl = document.getElementById('live-time');
 
   // Runtime sync config:
-  // - Local mode: use the local Node proxy endpoints (/api/*)
-  // - Always-on mode: call Google Apps Script directly (works on static hosting without local PC)
-  const DEFAULT_APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbxUKzUqJ5LaLBuo6uz9bSdtG5jFygJVspw-Z5lwV992mWXv54idcjivz2dfPfc7cTSTIg/exec';
-  const DEFAULT_SHEET_ID = '1caffNc0TQMuvZTdptFPRnD-5CefuS9Eqs4kr91BkDKY';
+  // App syncs only with the Node backend (/api/payout-sync), which persists data to Supabase.
   const runtimeConfig = (window.AUSZAHLUNG_CONFIG && typeof window.AUSZAHLUNG_CONFIG === 'object')
     ? window.AUSZAHLUNG_CONFIG
     : {};
 
   const normalizedApiBase = runtimeConfig.apiBaseUrl ? String(runtimeConfig.apiBaseUrl).replace(/\/$/, '') : '';
-  const isLocalHost = ['localhost', '127.0.0.1', '::1'].includes(window.location.hostname);
-  const useDirectSyncByUrl = new URLSearchParams(window.location.search).get('directSync') === '1';
-  const useDirectSyncByConfig = Boolean(runtimeConfig.forceDirectSync);
-  const isLikelyStaticHost = !isLocalHost && !normalizedApiBase;
-  const USE_DIRECT_GOOGLE_SYNC = useDirectSyncByUrl || useDirectSyncByConfig || isLikelyStaticHost;
-
-  const APPS_SCRIPT_URL = String(
-    runtimeConfig.appsScriptUrl
-    || localStorage.getItem('apps_script_url')
-    || DEFAULT_APPS_SCRIPT_URL
-  ).trim();
-
-  const GOOGLE_SHEET_ID = String(
-    runtimeConfig.googleSheetId
-    || localStorage.getItem('google_sheet_id')
-    || DEFAULT_SHEET_ID
-  ).trim();
 
   const apiUrl = (route) => `${normalizedApiBase}${route}`;
 
-  const SHEET_SYNC_PROXY = USE_DIRECT_GOOGLE_SYNC ? APPS_SCRIPT_URL : apiUrl('/api/sheet-sync');
-  const SHEET_IMPORT_PROXY = USE_DIRECT_GOOGLE_SYNC ? APPS_SCRIPT_URL : apiUrl('/api/sheet-import');
-  const SHEET_GVIZ_PROXY = USE_DIRECT_GOOGLE_SYNC
-    ? `https://docs.google.com/spreadsheets/d/${GOOGLE_SHEET_ID}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent('Data')}`
-    : apiUrl('/api/sheet-gviz');
-  const SERVER_SYNC_PROXY = apiUrl('/api/payout-sync');  // GET/PUT → server fallback store
-  const CAN_USE_SERVER_FALLBACK = !USE_DIRECT_GOOGLE_SYNC || Boolean(normalizedApiBase);
-  const GOOGLE_SHEET_TAB_NAME = 'Data';
+  const SERVER_SYNC_PROXY = apiUrl('/api/payout-sync');
   const TOMBSTONE_DIVISION_KEY = '__deleted__';
   const DELETED_IDS_STORAGE_KEY = 'payout_deleted_ids';
-  const DIRTY_PASSWORDS_STORAGE_KEY = 'payout_dirty_password_divisions';
-  let googleExportDisabled = false;
   let syncInProgress = false;
   let syncRequested = false;
-  let lastSuccessfulRemoteTarget = 'none';
-  let nextGoogleRetryAt = 0;
-  const GOOGLE_RETRY_COOLDOWN_MS = 30000;
 
   // --- INITIALIZATION ---
   initData().then(() => {
@@ -140,7 +108,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // --- FUNCTIONS ---
 
-  // Initialize localStorage data if empty and import from Google Sheets if possible
+  // Initialize localStorage data and import latest state from backend.
   async function initData() {
     Object.keys(DIVISIONS).forEach(key => {
       const historyKey = `payout_history_${key}`;
@@ -151,9 +119,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     try {
       await importFromRemoteSource();
-      if (USE_DIRECT_GOOGLE_SYNC) {
-        setSyncStatus('synced', 'Cloud-Sync aktiv (ohne Host-PC)');
-      }
+      setSyncStatus('synced', 'Supabase synchronisiert');
     } catch (error) {
       console.warn('Initial remote import failed:', error);
       setSyncStatus('offline', 'Feldfunk getrennt, lokaler Speicher aktiv');
@@ -245,15 +211,11 @@ document.addEventListener('DOMContentLoaded', () => {
       const remoteState = await importFromRemoteSource({ applyToLocal: false, suppressStatus: true });
       const localState = buildStateSnapshotFromLocalStorage();
       const deletedIdSet = getDeletedIdSet();
-      const dirtyPasswordDivisions = getDirtyPasswordDivisionSet();
       (remoteState && remoteState.deletedIds || []).forEach((id) => deletedIdSet.add(String(id)));
-      const mergedState = mergeStateSnapshots(remoteState, localState, { deletedIdSet, dirtyPasswordDivisions });
+      const mergedState = mergeStateSnapshots(remoteState, localState, { deletedIdSet });
 
       applyStateSnapshotToLocalStorage(mergedState);
-      const persistOk = await persistToRemoteStore(buildSheetPayload(mergedState));
-      if (persistOk && lastSuccessfulRemoteTarget === 'google') {
-        clearDirtyPasswordDivisionSet();
-      }
+      await persistToRemoteStore(buildSheetPayload(mergedState));
     } catch (error) {
       console.warn('Remote merge before save failed, trying direct upload:', error);
       await persistToRemoteStore(buildSheetPayload());
@@ -341,8 +303,7 @@ document.addEventListener('DOMContentLoaded', () => {
         throw new Error(`Server-Upload fehlgeschlagen (${response.status}): ${errText}`);
       }
 
-      lastSuccessfulRemoteTarget = 'server';
-      setSyncStatus('synced', 'Missionsserver synchronisiert');
+      setSyncStatus('synced', 'Supabase synchronisiert');
       return true;
     } catch (error) {
       console.warn('Server sync failed:', error);
@@ -351,34 +312,13 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   async function importFromRemoteSource(options = {}) {
-    try {
-      return await importFromGoogleSheet(options);
-    } catch (googleError) {
-      if (!CAN_USE_SERVER_FALLBACK) {
-        throw googleError;
-      }
-      console.warn('Google import unavailable, fallback to server store:', googleError);
-      return importFromServerStore(options);
-    }
+    return importFromServerStore(options);
   }
 
   async function persistToRemoteStore(payload = buildSheetPayload()) {
-    if (googleExportDisabled && Date.now() >= nextGoogleRetryAt) {
-      googleExportDisabled = false;
-    }
-
-    if (!googleExportDisabled) {
-      const googleOk = await persistToGoogleSheet(payload, { suppressOffline: true });
-      if (googleOk) {
-        return true;
-      }
-    }
-
-    if (CAN_USE_SERVER_FALLBACK) {
-      const serverOk = await persistToServerStore(payload);
-      if (serverOk) {
-        return true;
-      }
+    const serverOk = await persistToServerStore(payload);
+    if (serverOk) {
+      return true;
     }
 
     setSyncStatus('offline', 'Feldfunk getrennt, lokaler Speicher aktiv');
@@ -429,62 +369,6 @@ document.addEventListener('DOMContentLoaded', () => {
     };
   }
 
-  async function persistToGoogleSheet(payload = buildSheetPayload(), options = {}) {
-    const { suppressOffline = false } = options;
-
-    try {
-      const headers = {
-        'Accept': 'application/json'
-      };
-
-      // text/plain keeps the request "simple" for direct cross-origin Apps Script calls.
-      if (USE_DIRECT_GOOGLE_SYNC) {
-        headers['Content-Type'] = 'text/plain;charset=utf-8';
-      } else {
-        headers['Content-Type'] = 'application/json';
-      }
-
-      const response = await fetchWithTimeout(SHEET_SYNC_PROXY, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(payload)
-      });
-
-      if (!response.ok) {
-        const errText = await response.text();
-        if (response.status === 405) {
-          googleExportDisabled = true;
-          nextGoogleRetryAt = Date.now() + GOOGLE_RETRY_COOLDOWN_MS;
-          throw new Error('Google-Export nicht erlaubt (405). Server-Sync aktiv.');
-        }
-        throw new Error(`Export fehlgeschlagen (${response.status}): ${errText}`);
-      }
-      const body = await response.json().catch(() => ({}));
-      if (body && body.ok) {
-        googleExportDisabled = false;
-        nextGoogleRetryAt = 0;
-        lastSuccessfulRemoteTarget = 'google';
-        setSyncStatus('synced', 'Gefechtsdatenbank synchronisiert');
-        return true;
-      } else {
-        throw new Error(body && body.error ? body.error : 'Unbekannter Fehler beim Export');
-      }
-    } catch (error) {
-      console.warn('Google Sheet export failed:', error);
-      const reason = error && error.message ? error.message : 'Unbekannter Fehler';
-      if (!suppressOffline) {
-        if (googleExportDisabled) {
-          setSyncStatus('synced', 'Missionsserver synchronisiert');
-          showToast('Google-Upload deaktiviert (405). Missionsserver-Sync aktiv.', 'warning');
-        } else {
-          setSyncStatus('offline', 'Datenfunk-Upload fehlgeschlagen');
-          showToast(`Datenfunk-Upload fehlgeschlagen: ${reason}`, 'warning');
-        }
-      }
-      return false;
-    }
-  }
-
   function normalizeTransactionEntry(entry) {
     const recipient = entry && entry.recipient ? String(entry.recipient) : 'Unbekannt';
     const amount = parseFloat((entry && entry.amount) || 0);
@@ -519,40 +403,11 @@ document.addEventListener('DOMContentLoaded', () => {
     localStorage.setItem(DELETED_IDS_STORAGE_KEY, JSON.stringify(Array.from(deletedSet)));
   }
 
-  function getDirtyPasswordDivisionSet() {
-    try {
-      const raw = JSON.parse(localStorage.getItem(DIRTY_PASSWORDS_STORAGE_KEY) || '[]');
-      if (!Array.isArray(raw)) return new Set();
-      return new Set(raw.map(String));
-    } catch (error) {
-      return new Set();
-    }
-  }
-
-  function setDirtyPasswordDivisionSet(dirtySet) {
-    localStorage.setItem(DIRTY_PASSWORDS_STORAGE_KEY, JSON.stringify(Array.from(dirtySet)));
-  }
-
-  function markDirtyPasswordDivision(divisionId) {
-    if (!divisionId) return;
-    const dirty = getDirtyPasswordDivisionSet();
-    dirty.add(String(divisionId));
-    setDirtyPasswordDivisionSet(dirty);
-  }
-
-  function clearDirtyPasswordDivisionSet() {
-    localStorage.removeItem(DIRTY_PASSWORDS_STORAGE_KEY);
-  }
-
   function addDeletedId(id) {
     if (!id) return;
     const deleted = getDeletedIdSet();
     deleted.add(String(id));
     setDeletedIdSet(deleted);
-  }
-
-  function clearDeletedIds() {
-    localStorage.removeItem(DELETED_IDS_STORAGE_KEY);
   }
 
   function mergeTransactionArrays(remoteTransactions = [], localTransactions = [], preferLocal = true, deletedIdSet = new Set()) {
@@ -577,7 +432,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function mergeStateSnapshots(remoteState, localState, options = {}) {
-    const { preferLocal = true, deletedIdSet = new Set(), dirtyPasswordDivisions = new Set() } = options;
+    const { preferLocal = true, deletedIdSet = new Set() } = options;
     const merged = {
       payoutHistory: {},
       divisionPasswords: {},
@@ -592,11 +447,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
       const remotePassword = (remoteState && remoteState.divisionPasswords && remoteState.divisionPasswords[key]) || '';
       const localPassword = (localState && localState.divisionPasswords && localState.divisionPasswords[key]) || '';
-      if (dirtyPasswordDivisions.has(key)) {
-        merged.divisionPasswords[key] = localPassword || remotePassword;
-      } else {
-        merged.divisionPasswords[key] = remotePassword || localPassword;
-      }
+      merged.divisionPasswords[key] = preferLocal ? (localPassword || remotePassword) : (remotePassword || localPassword);
     });
 
     return merged;
@@ -621,173 +472,6 @@ document.addEventListener('DOMContentLoaded', () => {
     setDeletedIdSet(existingDeletedIds);
   }
 
-  async function importFromGoogleSheet(options = {}) {
-    const { applyToLocal = true, suppressStatus = false } = options;
-    try {
-      const importUrl = `${SHEET_IMPORT_PROXY}${SHEET_IMPORT_PROXY.includes('?') ? '&' : '?'}t=${Date.now()}`;
-      const response = await fetchWithTimeout(importUrl, {
-        headers: { 'Accept': 'application/json' }
-      });
-      if (!response.ok) throw new Error(`Import fehlgeschlagen (${response.status})`);
-
-      const body = await response.json().catch(() => null);
-      if (!body || !body.ok) {
-        throw new Error(body && body.error ? body.error : 'No valid import payload from Apps Script');
-      }
-
-      const data = body.data || null;
-
-      if (!data || !Array.isArray(data)) {
-        if (!suppressStatus) {
-          setSyncStatus('synced', 'Im Feldspeicher gesichert');
-        }
-        return buildStateSnapshotFromLocalStorage();
-      }
-
-      const transactionsByDivision = {};
-      const passwordsByDivision = {};
-      const importedDeletedIdSet = new Set();
-
-      Object.keys(DIVISIONS).forEach(key => {
-        transactionsByDivision[key] = [];
-      });
-
-      data.forEach(entry => {
-        if (entry.type === 'transaction' && entry.division === TOMBSTONE_DIVISION_KEY) {
-          const deletedId = entry.recipient ? String(entry.recipient) : '';
-          if (deletedId) {
-            importedDeletedIdSet.add(deletedId);
-          }
-          return;
-        }
-
-        if (entry.type === 'password' && entry.division) {
-          passwordsByDivision[entry.division] = entry.password || '';
-          return;
-        }
-
-        if (entry.type === 'transaction' && entry.division && transactionsByDivision[entry.division]) {
-          transactionsByDivision[entry.division].push(normalizeTransactionEntry(entry));
-        }
-      });
-
-      const importedState = {
-        payoutHistory: transactionsByDivision,
-        divisionPasswords: passwordsByDivision,
-        deletedIds: Array.from(importedDeletedIdSet),
-        lastUpdated: new Date().toISOString()
-      };
-
-      if (applyToLocal) {
-        applyStateSnapshotToLocalStorage(importedState);
-      }
-
-      if (!suppressStatus) {
-        setSyncStatus('synced', 'Gefechtsdatenbank importiert');
-      }
-
-      return importedState;
-    } catch (error) {
-      if (USE_DIRECT_GOOGLE_SYNC) {
-        console.warn('Direkter Google Sheet Import fehlgeschlagen:', error);
-        throw error;
-      }
-
-      try {
-        const fallbackData = await fetchSheetRowsViaGviz();
-        if (!Array.isArray(fallbackData)) {
-          throw error;
-        }
-
-        const transactionsByDivision = {};
-        const passwordsByDivision = {};
-        const importedDeletedIdSet = new Set();
-
-        Object.keys(DIVISIONS).forEach(key => {
-          transactionsByDivision[key] = [];
-        });
-
-        fallbackData.forEach(entry => {
-          if (entry.type === 'transaction' && entry.division === TOMBSTONE_DIVISION_KEY) {
-            const deletedId = entry.recipient ? String(entry.recipient) : '';
-            if (deletedId) {
-              importedDeletedIdSet.add(deletedId);
-            }
-            return;
-          }
-
-          if (entry.type === 'password' && entry.division) {
-            passwordsByDivision[entry.division] = entry.password || '';
-            return;
-          }
-
-          if (entry.type === 'transaction' && entry.division && transactionsByDivision[entry.division]) {
-            transactionsByDivision[entry.division].push(normalizeTransactionEntry(entry));
-          }
-        });
-
-        const importedState = {
-          payoutHistory: transactionsByDivision,
-          divisionPasswords: passwordsByDivision,
-          deletedIds: Array.from(importedDeletedIdSet),
-          lastUpdated: new Date().toISOString()
-        };
-
-        if (applyToLocal) {
-          applyStateSnapshotToLocalStorage(importedState);
-        }
-
-        if (!suppressStatus) {
-          setSyncStatus('synced', 'Gefechtsdatenbank importiert');
-        }
-
-        return importedState;
-      } catch (fallbackError) {
-        console.warn('Google Sheet import failed:', error);
-        throw fallbackError;
-      }
-    }
-  }
-
-  async function fetchSheetRowsViaGviz() {
-    const response = await fetchWithTimeout(SHEET_GVIZ_PROXY, { method: 'GET' });
-    if (!response.ok) {
-      throw new Error(`GViz Import fehlgeschlagen (${response.status})`);
-    }
-
-    const text = await response.text();
-    const match = text.match(/google\.visualization\.Query\.setResponse\((.*)\);?\s*$/s);
-    if (!match || !match[1]) {
-      throw new Error('Ungueltige GViz-Antwort');
-    }
-
-    const parsed = JSON.parse(match[1]);
-    const table = parsed && parsed.table ? parsed.table : null;
-    const rows = table && Array.isArray(table.rows) ? table.rows : [];
-
-    return rows.map((row) => {
-      const cells = Array.isArray(row.c) ? row.c : [];
-      const getCell = (index) => {
-        const cell = cells[index];
-        if (!cell) return '';
-        if (cell.v === null || cell.v === undefined) return '';
-        return String(cell.v);
-      };
-
-      return {
-        type: getCell(0),
-        division: getCell(1),
-        recipient: getCell(2),
-        amount: getCell(3),
-        purpose: getCell(4),
-        status: getCell(5),
-        timestamp: getCell(6),
-        password: getCell(7),
-        id: getCell(8)
-      };
-    }).filter((row) => row.type);
-  }
-
   function startRemoteSyncPolling() {
     setInterval(async () => {
       try {
@@ -802,12 +486,6 @@ document.addEventListener('DOMContentLoaded', () => {
           renderModalStats();
         }
 
-        const hasDirtyPasswords = getDirtyPasswordDivisionSet().size > 0;
-        const needsGoogleBackfill = hasDirtyPasswords || lastSuccessfulRemoteTarget !== 'google';
-        if (needsGoogleBackfill && !syncInProgress) {
-          syncRequested = true;
-          await runSyncLoop();
-        }
       } catch (error) {
         // Silent polling failure: status indicator is handled by explicit sync actions.
       }
@@ -929,7 +607,6 @@ document.addEventListener('DOMContentLoaded', () => {
   function setDivisionPassword(divisionId, password) {
     if (!password) return;
     localStorage.setItem(`division_password_${divisionId}`, password);
-    markDirtyPasswordDivision(divisionId);
     saveLocalAndSync();
   }
 

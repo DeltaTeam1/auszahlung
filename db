@@ -1,3 +1,7 @@
 # Database
 
-[Google Sheets](https://docs.google.com/spreadsheets/d/1caffNc0TQMuvZTdptFPRnD-5CefuS9Eqs4kr91BkDKY/edit?usp=sharing)
+Dieses Projekt nutzt jetzt Supabase als zentrale Datenbank.
+
+- SQL Schema: `supabase-schema.sql`
+- Setup-Doku: `CLOUD-24-7-SETUP.md`
+- Server-Config: `.env.example`

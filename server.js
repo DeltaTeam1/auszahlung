@@ -1,3 +1,5 @@
+require('dotenv').config();
+
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
@@ -15,13 +17,13 @@ const ENABLE_HTTPS = process.argv.includes('--https') || ['1', 'true', 'yes'].in
 const FORCE_HTTPS = ['1', 'true', 'yes'].includes(String(process.env.FORCE_HTTPS || '').toLowerCase());
 const SSL_KEY_PATH = process.env.SSL_KEY_PATH || path.join(__dirname, 'certs', 'server-key.pem');
 const SSL_CERT_PATH = process.env.SSL_CERT_PATH || path.join(__dirname, 'certs', 'server-cert.pem');
-const DATA_FILE = path.join(__dirname, 'remote-payout-data.json');
 const DIVISION_KEYS = ['hr', 'sf', 'mp', 'af', 'inf', 'mpy'];
 
-// --- Google Sheets credentials (server-side only, never exposed to client) ---
-const GOOGLE_SHEET_ID = process.env.GOOGLE_SHEET_ID || '1caffNc0TQMuvZTdptFPRnD-5CefuS9Eqs4kr91BkDKY';
-const GOOGLE_SHEET_TAB_NAME = process.env.GOOGLE_SHEET_TAB_NAME || 'Data';
-const GOOGLE_APPS_SCRIPT_URL = process.env.GOOGLE_APPS_SCRIPT_URL || 'https://script.google.com/macros/s/AKfycbxUKzUqJ5LaLBuo6uz9bSdtG5jFygJVspw-Z5lwV992mWXv54idcjivz2dfPfc7cTSTIg/exec';
+// --- Supabase settings (service key stays on server only) ---
+const SUPABASE_URL = process.env.SUPABASE_URL || 'https://zbhevvjhapozcujmgaao.supabase.co';
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+const SUPABASE_TABLE = process.env.SUPABASE_TABLE || 'app_state';
+const SUPABASE_ROW_ID = process.env.SUPABASE_ROW_ID || 'global';
 
 const DEFAULT_DATA = {
   payout_history: {
@@ -65,7 +67,7 @@ app.use(helmet({
 
 app.use(cors({
   origin: true,
-  methods: ['GET', 'POST', 'PUT', 'OPTIONS'],
+  methods: ['GET', 'PUT', 'OPTIONS'],
   allowedHeaders: ['Content-Type']
 }));
 
@@ -107,51 +109,12 @@ app.use(express.static(__dirname, {
   }
 }));
 
-// Helper: forward a request to an external URL and pipe the response back
-function proxyRequest(targetUrl, method, body, res) {
-  const url = new URL(targetUrl);
-  const lib = url.protocol === 'https:' ? https : http;
-  const options = {
-    hostname: url.hostname,
-    path: url.pathname + url.search,
-    method: method || 'GET',
-    headers: {
-      'Content-Type': 'application/json',
-      'Accept': 'application/json'
-    }
-  };
-  const bodyStr = body ? JSON.stringify(body) : null;
-  if (bodyStr) options.headers['Content-Length'] = Buffer.byteLength(bodyStr);
-
-  const req = lib.request(options, (proxyRes) => {
-    res.status(proxyRes.statusCode);
-    proxyRes.pipe(res, { end: true });
-  });
-  req.on('error', (err) => {
-    console.error('Proxy-Fehler:', err);
-    if (!res.headersSent) res.status(502).json({ error: 'Proxy-Verbindung fehlgeschlagen' });
-  });
-  if (bodyStr) req.write(bodyStr);
-  req.end();
-}
-
-function readRemoteData() {
-  try {
-    if (!fs.existsSync(DATA_FILE)) {
-      fs.writeFileSync(DATA_FILE, JSON.stringify(DEFAULT_DATA, null, 2));
-      return DEFAULT_DATA;
-    }
-    const raw = fs.readFileSync(DATA_FILE, 'utf8');
-    const parsed = JSON.parse(raw || JSON.stringify(DEFAULT_DATA));
-    return {
-      payout_history: parsed.payout_history || DEFAULT_DATA.payout_history,
-      division_passwords: parsed.division_passwords || DEFAULT_DATA.division_passwords,
-      deleted_ids: Array.isArray(parsed.deleted_ids) ? parsed.deleted_ids : [],
-      lastModified: parsed.lastModified || new Date().toISOString()
-    };
-  } catch (error) {
-    console.error('Fehler beim Lesen der Remote-Daten:', error);
-    return DEFAULT_DATA;
+function requireSupabaseConfig() {
+  if (!SUPABASE_URL) {
+    throw new Error('SUPABASE_URL fehlt');
+  }
+  if (!SUPABASE_SERVICE_ROLE_KEY) {
+    throw new Error('SUPABASE_SERVICE_ROLE_KEY fehlt');
   }
 }
 
@@ -232,14 +195,86 @@ function toServerDataSnapshot(payload = {}) {
   };
 }
 
-function writeRemoteData(data) {
-  try {
-    fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
-    return true;
-  } catch (error) {
-    console.error('Fehler beim Schreiben der Remote-Daten:', error);
-    return false;
+function buildSupabaseHeaders(extra = {}) {
+  return {
+    apikey: SUPABASE_SERVICE_ROLE_KEY,
+    Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+    'Content-Type': 'application/json',
+    ...extra
+  };
+}
+
+function toSupabaseRow(data) {
+  return {
+    id: SUPABASE_ROW_ID,
+    payout_history: data.payout_history,
+    division_passwords: data.division_passwords,
+    deleted_ids: data.deleted_ids,
+    last_modified: data.lastModified || new Date().toISOString()
+  };
+}
+
+function fromSupabaseRow(row) {
+  return {
+    payout_history: sanitizePayoutHistory(row && row.payout_history),
+    division_passwords: sanitizeDivisionPasswords(row && row.division_passwords),
+    deleted_ids: sanitizeDeletedIds(row && row.deleted_ids),
+    lastModified: (row && row.last_modified) || new Date().toISOString()
+  };
+}
+
+async function getSupabaseState() {
+  requireSupabaseConfig();
+
+  const select = encodeURIComponent('id,payout_history,division_passwords,deleted_ids,last_modified');
+  const url = `${SUPABASE_URL}/rest/v1/${encodeURIComponent(SUPABASE_TABLE)}?id=eq.${encodeURIComponent(SUPABASE_ROW_ID)}&select=${select}&limit=1`;
+
+  const response = await fetch(url, {
+    method: 'GET',
+    headers: buildSupabaseHeaders()
+  });
+
+  if (!response.ok) {
+    const details = await response.text().catch(() => '');
+    throw new Error(`Supabase-GET fehlgeschlagen (${response.status}): ${details}`);
   }
+
+  const rows = await response.json();
+  if (!Array.isArray(rows) || rows.length === 0) {
+    const initial = DEFAULT_DATA;
+    await upsertSupabaseState(initial);
+    return initial;
+  }
+
+  return fromSupabaseRow(rows[0]);
+}
+
+async function upsertSupabaseState(payload = {}) {
+  requireSupabaseConfig();
+
+  const sanitized = toServerDataSnapshot(payload);
+  const body = JSON.stringify(toSupabaseRow(sanitized));
+  const url = `${SUPABASE_URL}/rest/v1/${encodeURIComponent(SUPABASE_TABLE)}?on_conflict=id`;
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: buildSupabaseHeaders({
+      Prefer: 'resolution=merge-duplicates,return=representation'
+    }),
+    body
+  });
+
+  if (!response.ok) {
+    const details = await response.text().catch(() => '');
+    throw new Error(`Supabase-Upsert fehlgeschlagen (${response.status}): ${details}`);
+  }
+
+  const rows = await response.json().catch(() => []);
+  if (Array.isArray(rows) && rows.length > 0) {
+    return fromSupabaseRow(rows[0]);
+  }
+
+  return sanitized;
 }
 
 function ensureHttpsCredentials() {
@@ -317,55 +352,29 @@ function startHttpRedirectServer() {
   return server;
 }
 
-app.get('/api/payout-sync', (req, res) => {
-  const data = readRemoteData();
-  res.json(data);
+app.get('/api/payout-sync', async (req, res) => {
+  try {
+    const data = await getSupabaseState();
+    res.json(data);
+  } catch (error) {
+    console.error('GET /api/payout-sync Fehler:', error);
+    res.status(503).json({ error: error.message || 'Supabase nicht erreichbar' });
+  }
 });
 
-app.put('/api/payout-sync', (req, res) => {
+app.put('/api/payout-sync', async (req, res) => {
   const payload = req.body;
   if (!payload || typeof payload !== 'object') {
     return res.status(400).json({ error: 'Ungültige Nutzlast' });
   }
 
-  const updatedData = {
-    payout_history: sanitizePayoutHistory(payload.payout_history),
-    division_passwords: sanitizeDivisionPasswords(payload.division_passwords),
-    deleted_ids: sanitizeDeletedIds(payload.deleted_ids),
-    lastModified: payload.lastModified || new Date().toISOString()
-  };
-
-  if (!writeRemoteData(updatedData)) {
-    return res.status(500).json({ error: 'Speichern der Daten fehlgeschlagen' });
+  try {
+    const data = await upsertSupabaseState(payload);
+    res.json({ success: true, lastModified: data.lastModified });
+  } catch (error) {
+    console.error('PUT /api/payout-sync Fehler:', error);
+    res.status(503).json({ error: error.message || 'Supabase nicht erreichbar' });
   }
-
-  res.json({ success: true, lastModified: updatedData.lastModified });
-});
-
-// --- Proxy: POST to Apps Script (export) ---
-app.post('/api/sheet-sync', (req, res) => {
-  if (!GOOGLE_APPS_SCRIPT_URL) return res.status(503).json({ error: 'Apps Script nicht konfiguriert' });
-
-  // Keep local mirror in sync as automatic backup whenever clients push to Google.
-  const backupSnapshot = toServerDataSnapshot(req.body || {});
-  if (!writeRemoteData(backupSnapshot)) {
-    console.warn('Warnung: Lokales Backup konnte vor Google-Proxy nicht geschrieben werden.');
-  }
-
-  proxyRequest(GOOGLE_APPS_SCRIPT_URL, 'POST', req.body, res);
-});
-
-// --- Proxy: GET from Apps Script (import) ---
-app.get('/api/sheet-import', (req, res) => {
-  if (!GOOGLE_APPS_SCRIPT_URL) return res.status(503).json({ error: 'Apps Script nicht konfiguriert' });
-  proxyRequest(`${GOOGLE_APPS_SCRIPT_URL}?t=${Date.now()}`, 'GET', null, res);
-});
-
-// --- Proxy: GViz fallback read ---
-app.get('/api/sheet-gviz', (req, res) => {
-  if (!GOOGLE_SHEET_ID) return res.status(503).json({ error: 'Sheet ID nicht konfiguriert' });
-  const gvizUrl = `https://docs.google.com/spreadsheets/d/${GOOGLE_SHEET_ID}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent(GOOGLE_SHEET_TAB_NAME)}&t=${Date.now()}`;
-  proxyRequest(gvizUrl, 'GET', null, res);
 });
 
 if (ENABLE_HTTPS) {

@@ -1,54 +1,61 @@
-# 24/7 Betrieb (ohne laufenden PC)
+# 24/7 Betrieb mit Supabase (sichere Server-Anbindung)
 
 ## Ziel
 
-Die App soll weiterlaufen, auch wenn dein lokaler Rechner aus ist.
+Die App soll 24/7 laufen, auch wenn dein lokaler Rechner aus ist, und Daten sicher serverseitig in Supabase speichern.
 
-## Was wurde im Code vorbereitet
+## Architektur
 
-`script.js` nutzt jetzt automatisch einen **Direct-Cloud-Modus**, wenn die Seite nicht auf `localhost` geoeffnet wird:
+- Browser spricht nur mit deinem Node-Server (`/api/payout-sync`).
+- Node-Server spricht mit Supabase per `SUPABASE_SERVICE_ROLE_KEY`.
+- Kein direkter Browser-Zugriff auf Supabase-Daten.
 
-- Sync direkt gegen Google Apps Script (kein lokaler Node-Server noetig)
-- Kein Fallback auf lokale `/api/*`-Routen auf statischem Hosting
+## 1) Supabase Schema einrichten
 
-## Option A (empfohlen): Statisches Hosting
+1. In Supabase SQL Editor den Inhalt aus `supabase-schema.sql` ausführen.
+2. Prüfen, dass Tabelle `public.app_state` existiert.
+3. Prüfen, dass Datensatz mit `id = 'global'` vorhanden ist.
 
-Du kannst `index.html`, `styles.css` und `script.js` auf einem statischen Host deployen:
+## 2) Server-Umgebung konfigurieren
 
-- GitHub Pages
-- Netlify
-- Cloudflare Pages
-- Vercel (Static)
+1. `.env.example` nach `.env` kopieren.
+2. In `.env` mindestens setzen:
 
-Wichtig: Die Datei `google-apps-script.gs` muss als Web App deployed sein (Google Apps Script).
-
-## Google Apps Script Deploy
-
-1. In Google Apps Script `google-apps-script.gs` einfügen.
-2. `Bereitstellen` -> `Neue Bereitstellung` -> Typ `Web-App`.
-3. Ausführen als: `Ich`.
-4. Zugriff: passend zu deinem Bedarf (z. B. `Jeder mit Link`).
-5. Web-App-URL kopieren.
-
-## Optional: Eigene URL/Sheet-ID setzen
-
-Standardwerte sind bereits in `script.js` hinterlegt. Wenn du abweichende Werte willst:
-
-1. Seite im Browser öffnen.
-2. DevTools-Konsole öffnen.
-3. Befehle ausführen:
-
-```js
-localStorage.setItem('apps_script_url', 'DEINE_APPS_SCRIPT_WEBAPP_URL');
-localStorage.setItem('google_sheet_id', 'DEINE_GOOGLE_SHEET_ID');
-location.reload();
+```env
+SUPABASE_URL=https://zbhevvjhapozcujmgaao.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=DEIN_SERVICE_ROLE_KEY
+SUPABASE_TABLE=app_state
+SUPABASE_ROW_ID=global
 ```
 
-## Lokaler Betrieb bleibt moeglich
+Wichtig: `SUPABASE_SERVICE_ROLE_KEY` darf nur auf dem Server liegen, nie im Frontend.
 
-Auf deinem PC kannst du weiterhin lokal starten:
+## 3) Server deployen (24/7)
 
-- `npm start`
-- oder die Skripte in `tools/`
+Deploye dieses Projekt auf einem Node-Host (z. B. Render, Railway, Fly.io, VPS).
 
-Lokal nutzt die App automatisch den Node-Proxy (`/api/*`).
+Startkommando:
+
+```bash
+npm start
+```
+
+## 4) Frontend an den Server binden
+
+Die App ruft standardmäßig `/api/payout-sync` auf.
+Wenn Frontend und Backend auf unterschiedlichen Domains laufen, setze in `window.AUSZAHLUNG_CONFIG.apiBaseUrl` die Backend-URL.
+
+## Lokaler Test
+
+```powershell
+npm start
+```
+
+Dann im Browser öffnen:
+
+- `http://localhost:3000`
+
+## Hinweise zur Migration
+
+- Beim ersten erfolgreichen `GET /api/payout-sync` ohne vorhandene Supabase-Zeile migriert der Server automatisch Daten aus `remote-payout-data.json` nach Supabase.
+- Danach ist `remote-payout-data.json` nur noch Legacy-Backup.
