@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: auszahlung-api
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    autoDeploy: true
+    envVars:
+      - key: PORT
+        value: 3000
+      - key: SUPABASE_URL
+        value: https://zbhevvjhapozcujmgaao.supabase.co
+      - key: SUPABASE_TABLE
+        value: app_state
+      - key: SUPABASE_ROW_ID
+        value: global
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false

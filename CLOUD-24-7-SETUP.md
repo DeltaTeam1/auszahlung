@@ -40,10 +40,36 @@ Startkommando:
 npm start
 ```
 
+### Empfohlene schnelle Variante: Render
+
+Im Repository liegt bereits `render.yaml`.
+
+1. Repository bei Render als neues Web Service Projekt verbinden.
+2. Render erkennt `render.yaml` automatisch.
+3. In Render den geheimen Wert `SUPABASE_SERVICE_ROLE_KEY` setzen.
+4. Nach dem ersten Deploy die oeffentliche Backend-URL kopieren, z. B. `https://auszahlung-api.onrender.com`.
+
 ## 4) Frontend an den Server binden
 
 Die App ruft standardmäßig `/api/payout-sync` auf.
 Wenn Frontend und Backend auf unterschiedlichen Domains laufen, setze in `window.AUSZAHLUNG_CONFIG.apiBaseUrl` die Backend-URL.
+
+### GitHub Pages anbinden
+
+Fuer GitHub Pages liegt bereits `app-config.js` im Projekt.
+
+1. Oeffne `app-config.js`.
+2. Trage deine oeffentliche Backend-URL ein:
+
+```js
+window.AUSZAHLUNG_CONFIG = {
+	apiBaseUrl: 'https://DEIN-BACKEND.example.com'
+};
+```
+
+3. Committen und nach GitHub Pages veroeffentlichen.
+
+Danach nutzt die Seite auf GitHub Pages automatisch dein oeffentliches Backend.
 
 ## Lokaler Test
 

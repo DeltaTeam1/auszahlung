@@ -89,6 +89,7 @@ document.addEventListener('DOMContentLoaded', () => {
     : {};
 
   const normalizedApiBase = runtimeConfig.apiBaseUrl ? String(runtimeConfig.apiBaseUrl).replace(/\/$/, '') : '';
+  const isGitHubPagesHost = /github\.io$/i.test(window.location.hostname);
 
   const apiUrl = (route) => `${normalizedApiBase}${route}`;
 
@@ -122,7 +123,11 @@ document.addEventListener('DOMContentLoaded', () => {
       setSyncStatus('synced', 'Supabase synchronisiert');
     } catch (error) {
       console.warn('Initial remote import failed:', error);
-      setSyncStatus('offline', 'Feldfunk getrennt, lokaler Speicher aktiv');
+      if (isGitHubPagesHost && !normalizedApiBase) {
+        setSyncStatus('offline', 'Backend-URL fehlt, lokaler Speicher aktiv');
+      } else {
+        setSyncStatus('offline', 'Feldfunk getrennt, lokaler Speicher aktiv');
+      }
     }
   }
 
